@@ -1,0 +1,128 @@
+import Foundation
+import CryptoKit
+
+public struct Credentials: Sendable {
+    // Never persisted, printed, or passed to a subprocess argument.
+    let accessToken: String
+    public let expiresAt: Date?
+    public let plan: String?
+    public let rateLimitTier: String?
+    public let seatTier: String?
+    public var subscriptionPlan: SubscriptionPlan {
+        SubscriptionPlan(subscriptionType: plan, rateLimitTier: rateLimitTier, seatTier: seatTier)
+    }
+    let refreshToken: String?
+    let refreshTokenExpiresAt: Date?
+    let scopes: [String]
+    let clientID: String?
+
+    init(accessToken: String, expiresAt: Date?, plan: String?, refreshToken: String? = nil,
+         refreshTokenExpiresAt: Date? = nil, scopes: [String] = [], clientID: String? = nil,
+         rateLimitTier: String? = nil, seatTier: String? = nil) {
+        self.accessToken = accessToken; self.expiresAt = expiresAt; self.plan = plan
+        self.refreshToken = refreshToken; self.refreshTokenExpiresAt = refreshTokenExpiresAt
+        self.scopes = scopes; self.clientID = clientID
+        self.rateLimitTier = rateLimitTier; self.seatTier = seatTier
+    }
+
+    func hasSameTokens(as other: Credentials) -> Bool {
+        accessToken == other.accessToken && refreshToken == other.refreshToken
+    }
+    public static func parse(_ data: Data) throws -> Credentials {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = root["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String, !token.isEmpty else { throw MonitorError.noCredentials }
+        func date(_ key: String) -> Date? {
+            (oauth[key] as? NSNumber).flatMap { value -> Date? in
+            guard CFGetTypeID(value) != CFBooleanGetTypeID(), value.doubleValue.isFinite, value.doubleValue > 0 else { return nil }
+            return Date(timeIntervalSince1970: value.doubleValue / 1000)
+            }
+        }
+        let refresh = (oauth["refreshToken"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return Credentials(accessToken: token, expiresAt: date("expiresAt"), plan: oauth["subscriptionType"] as? String,
+                           refreshToken: refresh, refreshTokenExpiresAt: date("refreshTokenExpiresAt"),
+                           scopes: oauth["scopes"] as? [String] ?? [],
+                           clientID: (oauth["clientId"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                           rateLimitTier: oauth["rateLimitTier"] as? String,
+                           seatTier: oauth["seatTier"] as? String)
+    }
+}
+
+public enum CredentialStore {
+    public static func serviceName(for profile: Profile) -> String {
+        "Claude Code-credentials" + serviceSuffix(for: profile)
+    }
+
+    /// Claude Code's per-folder Keychain suffix: none for the default profile, which launches without
+    /// CLAUDE_CONFIG_DIR, otherwise "-" and the first 8 hex digits of the SHA-256 of the NFC config path.
+    static func serviceSuffix(for profile: Profile) -> String {
+        if profile.command == "claude" { return "" }
+        let path = profile.configDirectory.precomposedStringWithCanonicalMapping
+        let hash = SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "-" + hash.prefix(8)
+    }
+
+    /// Claude Code's state file: `~/.claude.json` for the default profile, `.claude.json` in the config folder otherwise.
+    static func claudeState(for profile: Profile) -> URL {
+        profile.command == "claude"
+            ? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".claude.json")
+            : URL(fileURLWithPath: profile.configDirectory).appendingPathComponent(".claude.json")
+    }
+    public static func read(profile: Profile) throws -> Credentials {
+        try readStored(profile: profile).credentials
+    }
+
+    static func runSecurity(service: String) throws -> (data: Data, status: Int32) {
+        try runSecurity(service: service, timeout: 15)
+    }
+
+    static func runSecurity(service: String, timeout: TimeInterval) throws -> (data: Data, status: Int32) {
+        let process = Process(); let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-a", NSUserName(), "-s", service, "-w"]
+        process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
+        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        do { try process.run() } catch { throw MonitorError.keychainLocked }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit(); deadline.cancel()
+        return (data, process.terminationStatus)
+    }
+
+    /// Runs `security` with arguments that carry no secret and discards its output; returns the exit status.
+    static func runSecurityStatus(_ arguments: [String], timeout: TimeInterval = 2) throws -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security"); process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        do { try process.run() } catch { throw MonitorError.keychainLocked }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
+        process.waitUntilExit(); deadline.cancel()
+        return process.terminationStatus
+    }
+
+    /// Runs one `security -i` command read from stdin, so secret data never appears in a
+    /// process's arguments. Returns false if security fails or does not finish within two seconds.
+    static func runSecurityCommand(_ command: Data) -> Bool {
+        let process = Process(), input = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security"); process.arguments = ["-i"]
+        process.standardInput = input; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        guard fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else { return false }
+        let deadline = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        do { try process.run() } catch { return false }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: deadline)
+        defer { deadline.cancel(); try? input.fileHandleForWriting.close() }
+        do { try input.fileHandleForWriting.write(contentsOf: command); try input.fileHandleForWriting.close() }
+        catch { if process.isRunning { process.terminate() }; process.waitUntilExit(); return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    public static func email(for profile: Profile) -> String? {
+        let path = claudeState(for: profile)
+        guard let size = try? path.resourceValues(forKeys: [.fileSizeKey]).fileSize, size < 10_485_760,
+              let data = try? Data(contentsOf: path), let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let account = root["oauthAccount"] as? [String: Any] else { return nil }
+        return account["emailAddress"] as? String
+    }
+}

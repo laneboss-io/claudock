@@ -1,0 +1,576 @@
+import SwiftUI
+import UsageCore
+
+struct ProfileManagerView: View {
+    @ObservedObject var store: MonitorStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var configPath = ""
+    @State private var editing: Profile?
+    @State private var deleting: Profile?
+    @State private var minting: Profile?
+    @State private var replacingKey: Profile?
+    @State private var settingCredit: Profile?
+    @State private var lastCredentialProfile: Profile?
+    @State private var credentialStatuses: [String: CredentialStatus] = [:]
+    @State private var credentialStatusRequests: [String: UUID] = [:]
+    @State private var unavailableCredentialStatuses: Set<String> = []
+    @State private var addKind: ProfileAuthKind = .subscription
+    @State private var apiKeyText = ""
+    @State private var busy = false
+    @State private var failure: String?
+    @State private var notice: String?
+    @State private var loginAfterAdd = true
+    @State private var shellEnabled = false
+    @State private var shellStatusKnown = false
+    @State private var shellFailure: String?
+
+    private var actionsUnavailable: Bool { busy || store.refreshing || store.isDemo }
+
+    private var shellExplanation: String {
+        guard shellStatusKnown else { return "Shell integration status is unavailable. Profile management still works in Claudock." }
+        if shellEnabled {
+            return "Managed shortcuts update automatically in zsh tabs running the current integration. Open a new Terminal tab, or run source ~/.config/claudock/init.zsh once in an existing tab. Your own commands keep their behavior."
+        }
+        return "Optional. Enable this to add claudock and profile shortcuts in new Terminal tabs. You can always use Copy launch command. Already-open tabs keep their loaded functions until closed."
+    }
+
+    var body: some View {
+        let _ = PerfProbe.count("manager.body")
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Your profiles").font(.system(size: 22, weight: .semibold))
+                    Text("Managed by Claudock. No shell changes required.").font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if busy { ProgressView().controlSize(.small).accessibilityLabel("Updating profile") }
+                Button(store.isDemo ? "Close preview" : "Done") { dismiss() }.keyboardShortcut(.cancelAction).disabled(busy)
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(editing == nil ? "Add an account" : "Rename \(editing!.name)").font(.headline)
+                    if editing == nil {
+                        Picker("Account type", selection: $addKind) {
+                            Text("Claude subscription").tag(ProfileAuthKind.subscription)
+                            Text("Console API key").tag(ProfileAuthKind.apiKey)
+                            Text("Console account (sign in)").tag(ProfileAuthKind.consoleLogin)
+                        }
+                        .pickerStyle(.segmented).labelsHidden().accessibilityIdentifier("profileKindPicker")
+                        Text("A third-party endpoint, such as DeepSeek's Anthropic-compatible API, is added in Terminal: "
+                             + "claudock profile add NAME --endpoint URL --model MODEL")
+                            .font(.caption).foregroundStyle(.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Text("Name").foregroundStyle(.secondary)
+                        TextField("profile-name", text: $name).textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("profileNameField")
+                            .onSubmit { save() }
+                    }
+                    if editing == nil {
+                        HStack {
+                            Text(configPath.isEmpty ? "Shared sessions and settings, with a separate account login" : configPath)
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button(configPath.isEmpty ? "Import folder…" : "Change…") { chooseFolder() }
+                            if !configPath.isEmpty { Button { configPath = "" } label: { Image(systemName: "xmark.circle") }.buttonStyle(.plain) }
+                        }
+                        if addKind == .apiKey {
+                            HStack {
+                                Text("Key").foregroundStyle(.secondary)
+                                SecureField("sk-ant-…", text: $apiKeyText).textFieldStyle(.roundedBorder)
+                                    .accessibilityLabel("Console API key")
+                                    .accessibilityIdentifier("profileAPIKeyField")
+                                    .onSubmit { save() }
+                            }
+                            Text("Billed per token by the Claude Console. The key is stored only in Keychain.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else if addKind == .consoleLogin {
+                            Text("Signs in to an Anthropic Console account in your browser; Claude Code creates and keeps the API key. "
+                                 + "Billed per token to that Console organization.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            Toggle("Open Console sign-in after adding", isOn: $loginAfterAdd).font(.caption)
+                        } else {
+                            Toggle("Open Claude sign-in after adding", isOn: $loginAfterAdd).font(.caption)
+                        }
+                    } else {
+                        Text("The config folder and login stay the same.").font(.caption).foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Letters, numbers, hyphens, underscores · up to 40 characters").font(.system(size: 10)).foregroundStyle(.secondary)
+                        Spacer()
+                        if editing != nil { Button("Cancel rename") { resetEditor() } }
+                        Button(editing == nil ? "Add profile" : "Save name") { save() }
+                            .buttonStyle(.borderedProminent).tint(controlAccent).foregroundStyle(.white).disabled(!canSave)
+                            .accessibilityIdentifier("saveProfileButton")
+                    }
+                }.padding(8)
+            }.disabled(actionsUnavailable)
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Toggle("Enable claudock in zsh", isOn: Binding(get: { shellEnabled }, set: { updateShell(enabled: $0) }))
+                            .disabled(actionsUnavailable || !shellStatusKnown)
+                        Spacer()
+                        Button("Import zsh profiles") { importProfiles() }.disabled(actionsUnavailable)
+                    }
+                    Text(shellExplanation)
+                        .font(.system(size: 10)).foregroundStyle(.secondary).textSelection(.enabled)
+                    if let message = shellFailure ?? store.shellIntegrationError { Text(message).font(.caption).foregroundStyle(.red) }
+                }.padding(8)
+            }
+            if let notice { Text(notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if let error = store.profileError { Text(error).font(.caption).foregroundStyle(.red) }
+            if !store.isDemo && TerminalLauncher.executable == nil {
+                HStack {
+                    Text("Install Claude Code before signing in.").font(.caption)
+                    Link("Installation guide", destination: URL(string: "https://code.claude.com/docs/en/setup")!)
+                    Button("Locate Claude…") { TerminalLauncher.chooseExecutable() }.disabled(actionsUnavailable)
+                }
+            }
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(store.accounts) { account in
+                        ProfileRow(profile: account.profile, credentialStatus: credentialStatusDescription(account.profile),
+                                   credentialButton: credentialButtonTitle(account.profile), actionsUnavailable: actionsUnavailable,
+                                   login: { login(account.profile) }, rename: { beginRename(account.profile) },
+                                   remove: { requestRemoval(account.profile) }, copy: { copyCommand(account.profile) },
+                                   setCredential: { beginCredentialChange(account.profile) },
+                                   setCredit: { if !actionsUnavailable { settingCredit = account.profile } })
+                            .equatable()
+                        Divider()
+                    }
+                }
+            }
+            Text("Rename keeps the same login and workspace. Remove only deletes the Claudock registration and its managed shortcuts; shared conversations, settings, saved logins, and your own shell commands are kept.")
+                .font(.system(size: 10)).foregroundStyle(.secondary).textSelection(.enabled)
+        }.padding(24).frame(width: 650, height: 730)
+            .task { await readShellStatus() }
+            .task(id: credentialStatusProfiles) { await readCredentialStatuses(credentialStatusProfiles) }
+            // A Console sign-in finishes in Terminal and the browser, outside the app: read it again on return.
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                for profile in credentialStatusProfiles where profile.authKind == .consoleLogin {
+                    Task { await readCredentialStatus(profile) }
+                }
+            }
+            .interactiveDismissDisabled(busy)
+            .sheet(item: $minting, onDismiss: {
+                if let profile = lastCredentialProfile { Task { await readCredentialStatus(profile) } }
+            }) { profile in MintTokenView(profile: profile, tokenSaved: hasSavedToken(profile)) }
+            .sheet(item: $replacingKey, onDismiss: {
+                if let profile = lastCredentialProfile { Task { await readCredentialStatus(profile) } }
+            }) { profile in APIKeyView(profile: profile) }
+            .sheet(item: $settingCredit) { profile in CreditView(store: store, profile: profile) }
+            .alert("Profile action needs attention", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
+                Button("OK") { failure = nil }
+            } message: { Text(failure ?? "") }
+            .alert("Remove profile?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { profile in
+                Button("Cancel", role: .cancel) { deleting = nil }
+                Button("Remove profile", role: .destructive) { remove(profile) }.disabled(actionsUnavailable)
+            } message: { profile in
+                Text("Remove \(profile.name) from Claudock? Shared conversations and settings, this account's config folder and its credentials in Keychain (a login, key, or token), and your own shell commands will be kept. Only shortcuts still owned by Claudock are removed when a loaded integration next synchronizes.")
+            }
+    }
+    private var canSave: Bool {
+        !name.isEmpty && (editing != nil || addKind != .apiKey || !apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+    private func resetEditor() { editing = nil; name = ""; configPath = ""; apiKeyText = "" }
+    private func credentialButtonTitle(_ profile: Profile) -> String {
+        if profile.authKind == .apiKey { return "Replace API key…" }
+        if profile.authKind == .endpoint { return "Replace key…" }
+        switch credentialStatuses[profile.id] {
+        case .token(.active)?, .token(.expired)?, .token(.imported)?: return "Manage token…"
+        default: return "Set token…"
+        }
+    }
+    /// Whether an inference token item may exist for the row: its latest status read could not read it, as with a token
+    /// that no longer decodes, which is the one to delete, or found one, one that belongs to another login included.
+    private func hasSavedToken(_ profile: Profile) -> Bool {
+        if unavailableCredentialStatuses.contains(profile.id) { return true }
+        switch credentialStatuses[profile.id] {
+        case .token(.active)?, .token(.expired)?, .token(.imported)?, .tokenOfAnotherAccount?: return true
+        default: return false
+        }
+    }
+    private func beginCredentialChange(_ profile: Profile) {
+        guard !actionsUnavailable, !profile.isVertex, profile.discoveryNote == nil, profile.authKind != .consoleLogin else { return }
+        lastCredentialProfile = profile
+        if profile.authKind == .apiKey || profile.authKind == .endpoint { replacingKey = profile } else { minting = profile }
+    }
+    private func credentialStatusDescription(_ profile: Profile) -> String {
+        let apiKey = profile.authKind == .apiKey, console = profile.authKind == .consoleLogin, endpoint = profile.authKind == .endpoint
+        if store.isDemo && profile.authKind == .subscription { return "Inference token: demo preview" }
+        if profile.isVertex || profile.discoveryNote != nil { return "Inference token unavailable for this profile" }
+        if unavailableCredentialStatuses.contains(profile.id) {
+            return apiKey ? "API key status unavailable" : console ? "Console sign-in status unavailable"
+                : endpoint ? "Endpoint key status unavailable" : "Inference token status unavailable"
+        }
+        guard let status = credentialStatuses[profile.id] else {
+            return apiKey ? "Checking API key…" : console ? "Checking Console sign-in…" : endpoint ? "Checking endpoint key…" : "Checking inference token…"
+        }
+        switch status {
+        case .endpointKey(let saved):
+            let label = profile.endpoint.map { "Third-party endpoint · \($0.host) · \($0.model)" } ?? "Third-party endpoint"
+            return label + (saved ? " · key saved · billed per token by the provider" : " · key missing · choose Replace key…")
+        case .consoleLogin(let signedIn):
+            guard signedIn else { return "Not signed in to a Console account · choose Sign in…" }
+            let account = store.accounts.first(where: { $0.profile == profile })
+            let label = account?.consoleLabel ?? "Console login"
+            if let error = account?.creditError { return label + " · " + error }
+            guard let credit = account?.credit else { return label + " · no credit set" }
+            return "\(label) · \(credit.leftText) left of \(credit.balanceText) credit"
+        case .apiKey(let saved):
+            guard saved else { return "API key missing" }
+            let account = store.accounts.first(where: { $0.profile == profile })
+            if let error = account?.creditError { return "Console API key · " + error }
+            guard let credit = account?.credit else { return "Console API key · no credit set" }
+            return "Console API key · \(credit.leftText) left of \(credit.balanceText) credit"
+        case .token(.notConfigured): return "No inference token"
+        case .token(.active(let expiry)):
+            return "Inference token \(expiry > store.now ? "expires" : "expired") \(expiry.formatted(date: .abbreviated, time: .shortened))"
+        case .token(.expired(let expiry)): return "Inference token expired \(expiry.formatted(date: .abbreviated, time: .shortened))"
+        case .token(.imported(let expiry)):
+            if let expiry {
+                return "Pasted token · account unverified · \(expiry > store.now ? "expires" : "expired") \(expiry.formatted(date: .abbreviated, time: .shortened))"
+            }
+            return "Pasted token · expiry unknown · account unverified"
+        case .tokenOfAnotherAccount:
+            return "Inference token belongs to a different account than this login · use Re-login with that account, or Set token… to replace it"
+        }
+    }
+    private var credentialStatusProfiles: [Profile] {
+        store.accounts.map(\.profile).filter { !$0.isVertex && $0.discoveryNote == nil }
+    }
+    private func readCredentialStatus(_ profile: Profile) async {
+        guard !profile.isVertex, profile.discoveryNote == nil else { return }
+        let isDemo = store.isDemo
+        let request = UUID()
+        credentialStatusRequests[profile.id] = request
+        do {
+            let status = try await Task.detached(priority: .utility) { try readLaunchCredential(profile, isDemo: isDemo) }.value
+            guard !Task.isCancelled, credentialStatusRequests[profile.id] == request,
+                  store.accounts.contains(where: { $0.profile == profile }) else { return }
+            credentialStatuses[profile.id] = status; unavailableCredentialStatuses.remove(profile.id)
+        } catch {
+            guard !Task.isCancelled, credentialStatusRequests[profile.id] == request,
+                  store.accounts.contains(where: { $0.profile == profile }) else { return }
+            unavailableCredentialStatuses.insert(profile.id)
+        }
+    }
+    /// Reads every listed profile's inference token or API key status once per sheet opening
+    /// or profile change, off the main actor and at most four at a time (each read may start a
+    /// `security` process). Results are published together, at most every 100 ms, so rows do not
+    /// re-render the sheet one by one and a slow read does not hold back the others.
+    /// A newer single-profile read (after a credential sheet closes) wins for that profile.
+    private func readCredentialStatuses(_ profiles: [Profile]) async {
+        guard !profiles.isEmpty else { return }
+        let isDemo = store.isDemo
+        let request = UUID()
+        var requests = credentialStatusRequests
+        for profile in profiles { requests[profile.id] = request }
+        credentialStatusRequests = requests
+        await withTaskGroup(of: (Profile, CredentialStatus?).self) { group in
+            var pending = profiles.makeIterator()
+            func readNext() {
+                guard let profile = pending.next() else { return }
+                group.addTask(priority: .utility) { (profile, try? readLaunchCredential(profile, isDemo: isDemo)) }
+            }
+            for _ in 0..<4 { readNext() }
+            var ready: [(Profile, CredentialStatus?)] = []
+            var published = ContinuousClock.now
+            while let result = await group.next() {
+                ready.append(result)
+                readNext()
+                guard group.isEmpty || published.duration(to: .now) >= .milliseconds(100) else { continue }
+                publishCredentialStatuses(ready, request: request)
+                ready.removeAll(); published = .now
+            }
+        }
+    }
+    private func publishCredentialStatuses(_ results: [(Profile, CredentialStatus?)], request: UUID) {
+        guard !Task.isCancelled else { return }
+        let current = Set(store.accounts.map(\.profile))
+        var statuses = credentialStatuses, unavailable = unavailableCredentialStatuses
+        for (profile, status) in results where credentialStatusRequests[profile.id] == request && current.contains(profile) {
+            if let status { statuses[profile.id] = status; unavailable.remove(profile.id) }
+            else { unavailable.insert(profile.id) }
+        }
+        credentialStatuses = statuses; unavailableCredentialStatuses = unavailable
+    }
+    private func beginRename(_ profile: Profile) {
+        guard !actionsUnavailable, profile.command != "claude", !profile.isVertex, profile.discoveryNote == nil else { return }
+        editing = profile; name = profile.name; configPath = ""; notice = nil; failure = nil
+    }
+    private func requestRemoval(_ profile: Profile) {
+        guard !actionsUnavailable, profile.command != "claude", !profile.isVertex else { return }
+        deleting = profile; failure = nil
+    }
+    private func shortcutNotice(_ profile: Profile) -> String {
+        guard shellStatusKnown else { return "Use Copy launch command; shell integration status could not be verified." }
+        if shellEnabled { return "\(profile.command) is available in zsh tabs running the current integration, unless your own command already uses that name." }
+        return "Use Copy launch command, or enable zsh integration to add a \(profile.command) shortcut."
+    }
+    private func copyCommand(_ profile: Profile) {
+        guard !actionsUnavailable else { return }
+        store.copyCommand(profile)
+        notice = profile.isVertex || profile.discoveryNote != nil
+            ? "Copied your existing \(profile.command) command."
+            : "Copied an explicit Claudock launch command for \(profile.name). It works without a profile shortcut."
+    }
+    private func chooseFolder() {
+        guard !actionsUnavailable else { return }
+        let picker = NSOpenPanel(); picker.canChooseDirectories = true; picker.canChooseFiles = false
+        picker.message = "Choose an existing Claude config folder (the folder containing .claude.json or projects)."
+        if picker.runModal() == .OK, let url = picker.url { configPath = url.path }
+    }
+    private func save() {
+        guard !actionsUnavailable, canSave else { return }
+        busy = true; failure = nil; notice = nil
+        let existing = editing; let requestedName = name; let directory = configPath
+        let kind = addKind, rawKey = apiKeyText
+        let shouldLogin = loginAfterAdd && kind != .apiKey
+        apiKeyText = ""
+        Task {
+            defer { busy = false }
+            do {
+                let profile = try await Task.detached {
+                    if let existing { return try ProfileManager.rename(profile: existing, to: requestedName) }
+                    let folder = directory.isEmpty ? nil : directory
+                    if kind == .apiKey {
+                        // The key is checked before anything is created, and saved before the profile is listed.
+                        return try ProfileManager.addAPIKeyProfile(name: requestedName, apiKey: ConsoleAPIKey(parsing: rawKey), configDirectory: folder)
+                    }
+                    if kind == .consoleLogin { return try ProfileManager.addConsoleLoginProfile(name: requestedName, configDirectory: folder) }
+                    return try ProfileManager.add(name: requestedName, configDirectory: folder)
+                }.value
+                await readShellStatus()
+                notice = (existing == nil ? "Added \(profile.name). " : "Renamed to \(profile.name). ") + shortcutNotice(profile)
+                    + (existing == nil && kind == .apiKey ? " The first Terminal launch asks whether to use the API key; choose Yes." : "")
+                    + (existing == nil && kind == .consoleLogin && !shouldLogin ? " Choose Sign in… to sign it in to its Console account." : "")
+                resetEditor()
+                store.refresh()
+                if existing == nil && shouldLogin {
+                    do { try await TerminalLauncher.login(profile: profile) }
+                    catch { failure = "The profile was saved, but Claude sign-in could not open. \(error.localizedDescription)" }
+                }
+            } catch { failure = error.localizedDescription }
+        }
+    }
+    private func remove(_ profile: Profile) {
+        guard !actionsUnavailable else { return }
+        deleting = nil; busy = true; failure = nil; notice = nil
+        Task {
+            defer { busy = false }
+            do {
+                let left = try await Task.detached {
+                    try ProfileManager.remove(profile: profile)
+                    return ProfileKeychainItems.lookup(for: profile)
+                }.value
+                if editing?.id == profile.id { resetEditor() }
+                notice = removalNotice(profile, left)
+                store.refresh()
+            } catch { failure = error.localizedDescription }
+        }
+    }
+    /// Removal keeps every credential, and the list forgets where they are: name each Keychain item that is left with
+    /// the command that deletes it, and the config folder. Deleting an item does not revoke its key.
+    private func removalNotice(_ profile: Profile, _ left: ProfileKeychainLookup) -> String {
+        var lines = ["Removed \(profile.name). Shared history, settings, and credentials were kept. Your own shell commands are unchanged."]
+        if !left.existing.isEmpty || !left.unchecked.isEmpty {
+            lines.append("Credentials left in Keychain. To delete one, run its command in Terminal:")
+            lines += left.existing.map { "\($0.title): \($0.deleteCommand)" }
+            lines += left.unchecked.map { "\($0.title) (Keychain could not be checked; it may not exist): \($0.deleteCommand)" }
+        }
+        if !profile.configDirectory.isEmpty {
+            // Quoted for the shell, as the CLI prints it, so it can go into `rm -r` as it is.
+            lines.append("Config folder: \(LaunchCommand.quote(profile.configDirectory))")
+        }
+        lines.append(profile.authKind.isEndpoint
+                     ? "Keys and tokens stay valid until they are revoked: an endpoint key at its provider, others in the Console or on claude.ai."
+                     : "Keys and tokens stay valid at Anthropic until they are revoked in the Console or on claude.ai.")
+        return lines.joined(separator: "\n")
+    }
+    private func login(_ profile: Profile) {
+        guard !actionsUnavailable else { return }
+        busy = true; failure = nil; notice = nil
+        Task {
+            defer { busy = false }
+            do {
+                try await TerminalLauncher.login(profile: profile)
+                notice = profile.authKind == .consoleLogin
+                    ? "Finish signing in to \(profile.name)'s Anthropic Console account in Terminal and your browser."
+                    : "Finish signing in to \(profile.name) in Terminal, then refresh the monitor."
+            } catch { failure = error.localizedDescription }
+        }
+    }
+    private func readShellStatus() async {
+        if store.isDemo { shellEnabled = false; shellStatusKnown = true; shellFailure = nil; return }
+        do {
+            shellEnabled = try await Task.detached { try ShellIntegration.status() }.value
+            shellStatusKnown = true; shellFailure = nil
+        } catch {
+            shellStatusKnown = false; shellFailure = error.localizedDescription
+        }
+    }
+    private func updateShell(enabled: Bool) {
+        guard !actionsUnavailable else { return }
+        let cli = TerminalLauncher.bundledCLI
+        if enabled && cli == nil {
+            shellFailure = "The bundled claudock CLI is missing. Reinstall the complete Claudock app."
+            return
+        }
+        busy = true; shellFailure = nil
+        Task {
+            do {
+                try await Task.detached {
+                    if enabled, let cli { try ShellIntegration.enable(cliPath: cli) }
+                    else { try ShellIntegration.disable() }
+                }.value
+                await readShellStatus()
+                store.shellIntegrationError = nil
+            } catch { shellFailure = error.localizedDescription }
+            busy = false
+        }
+    }
+    private func importProfiles() {
+        guard !actionsUnavailable else { return }
+        busy = true; failure = nil; notice = nil
+        Task {
+            do {
+                let profiles = try await Task.detached { try ProfileStore.importShellProfiles() }.value
+                notice = "Claudock now has \(profiles.count) profiles. Your shell files were only read."
+                store.refresh()
+            } catch { failure = error.localizedDescription }
+            busy = false
+        }
+    }
+}
+
+/// One profile in Manage profiles. Inputs are plain values, compared by `==`, so sheet
+/// updates skip rows that did not change. The action closures are not compared; they
+/// only reach the sheet's state and the store, which stay the same objects.
+private struct ProfileRow: View, Equatable {
+    let profile: Profile
+    /// The inference token, the Console API key of an API-key profile, the sign-in of a Console-login profile, or the
+    /// endpoint and key of a third-party endpoint profile.
+    let credentialStatus: String
+    let credentialButton: String
+    let actionsUnavailable: Bool
+    let login: () -> Void
+    let rename: () -> Void
+    let remove: () -> Void
+    let copy: () -> Void
+    let setCredential: () -> Void
+    let setCredit: () -> Void
+
+    static func == (lhs: ProfileRow, rhs: ProfileRow) -> Bool {
+        lhs.profile == rhs.profile && lhs.credentialStatus == rhs.credentialStatus && lhs.credentialButton == rhs.credentialButton
+            && lhs.actionsUnavailable == rhs.actionsUnavailable
+    }
+
+    var body: some View {
+        let _ = PerfProbe.count("manager.row")
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(profile.name).font(.system(.body, design: .monospaced)).fontWeight(.medium)
+                    .lineLimit(1).truncationMode(.middle).help(profile.command)
+                Text(profile.managed ? "MANAGED" : "IMPORTED").font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer()
+                if !profile.isVertex && profile.discoveryNote == nil && profile.authKind == .subscription {
+                    Button("Re-login", action: login).disabled(actionsUnavailable)
+                        .accessibilityLabel("Re-login to \(profile.name)")
+                        .help("Opens this profile’s Claude sign-in in Terminal")
+                }
+                if profile.command != "claude" && !profile.isVertex {
+                    Button("Rename…", action: rename)
+                        .disabled(actionsUnavailable || profile.discoveryNote != nil)
+                        .accessibilityLabel("Rename \(profile.name)")
+                        .accessibilityIdentifier("renameProfile-\(profile.id)")
+                        .help("Change the profile name while keeping its login and shared workspace")
+                    Button("Remove…", role: .destructive, action: remove)
+                        .disabled(actionsUnavailable)
+                        .accessibilityLabel("Remove \(profile.name) from Claudock")
+                        .accessibilityIdentifier("removeProfile-\(profile.id)")
+                        .help("Remove this registration. Shared history, settings, and the saved login are kept.")
+                }
+                Menu {
+                    Button("Copy launch command", action: copy)
+                    if !profile.configDirectory.isEmpty {
+                        Button("Show config folder") { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: profile.configDirectory) }
+                    }
+                } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize()
+                    .disabled(actionsUnavailable).help("More actions for \(profile.name)")
+            }.buttonStyle(.bordered).controlSize(.small)
+            Text(profile.discoveryNote ?? profile.configDirectory).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+            HStack(spacing: 12) {
+                Text(credentialStatus).font(.system(size: 10)).foregroundStyle(.secondary)
+                    .accessibilityLabel(credentialStatus)
+                Spacer(minLength: 8)
+                if profile.authKind.isConsole {
+                    Button("Set credit…", action: setCredit)
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .disabled(actionsUnavailable)
+                        .accessibilityIdentifier("setCredit-\(profile.id)")
+                        .accessibilityLabel("Set Console credit for \(profile.name)")
+                        .help("Enter the remaining credit shown in the Claude Console")
+                    if profile.authKind == .apiKey {
+                        Button(credentialButton, action: setCredential)
+                            .buttonStyle(.bordered).controlSize(.small)
+                            .disabled(actionsUnavailable)
+                            .accessibilityIdentifier("replaceAPIKey-\(profile.id)")
+                            .accessibilityLabel("Replace Console API key for \(profile.name)")
+                            .help("Paste a new Console API key; it replaces the key saved in Keychain")
+                    } else {
+                        Button("Sign in…", action: login)
+                            .buttonStyle(.bordered).controlSize(.small)
+                            .disabled(actionsUnavailable)
+                            .accessibilityIdentifier("consoleSignIn-\(profile.id)")
+                            .accessibilityLabel("Sign in to the Anthropic Console account for \(profile.name)")
+                            .help("Opens Claude Code’s Console sign-in for this profile in Terminal")
+                    }
+                } else if profile.authKind == .endpoint {
+                    Button(credentialButton, action: setCredential)
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .disabled(actionsUnavailable)
+                        .accessibilityIdentifier("replaceEndpointKey-\(profile.id)")
+                        .accessibilityLabel("Replace the third-party endpoint key for \(profile.name)")
+                        .help("Paste a new key for this endpoint; it replaces the key saved in Keychain")
+                } else {
+                    Button(credentialButton, action: setCredential)
+                        .buttonStyle(.bordered).controlSize(.small)
+                        .disabled(actionsUnavailable || profile.isVertex || profile.discoveryNote != nil)
+                        .accessibilityIdentifier("mintToken-\(profile.id)")
+                        .accessibilityLabel("Set or replace inference token for \(profile.name)")
+                        .help("Paste an existing inference token or create one in your browser")
+                }
+            }
+        }.padding(.vertical, 13)
+    }
+}
+
+/// What a row shows about its launch credential.
+private enum CredentialStatus: Equatable {
+    case token(MintTokenStatus)
+    /// The saved token was bound to an account other than the profile's current login.
+    case tokenOfAnotherAccount
+    case apiKey(saved: Bool)
+    /// Whether Claude Code's Console sign-in keeps an API key for the profile.
+    case consoleLogin(signedIn: Bool)
+    /// Whether a third-party endpoint profile's key is saved.
+    case endpointKey(saved: Bool)
+}
+
+/// Reads one profile's credential status; it may start a `security` process, so call it off the main actor.
+private func readLaunchCredential(_ profile: Profile, isDemo: Bool) throws -> CredentialStatus {
+    if profile.authKind == .apiKey {
+        return .apiKey(saved: isDemo ? DemoData.apiKeySaved(profile: profile) : try APIKeyStore.isSaved(profile: profile))
+    }
+    if profile.authKind == .consoleLogin {
+        return .consoleLogin(signedIn: isDemo ? DemoData.consoleSignedIn(profile: profile) : try ConsoleLogin.isSignedIn(profile: profile))
+    }
+    if profile.authKind == .endpoint {
+        return .endpointKey(saved: isDemo ? true : try EndpointKeyStore.isSaved(profile: profile))
+    }
+    do { return .token(isDemo ? DemoData.mintStatus(profile: profile) : try MintTokenStore.status(profile: profile)) }
+    catch MintTokenError.accountMismatch { return .tokenOfAnotherAccount }
+}

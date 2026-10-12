@@ -1,0 +1,503 @@
+import Foundation
+import Darwin
+
+/// Claudock's authoritative account registry. Shell discovery runs once at bootstrap and
+/// subsequently only when explicitly requested. Config paths are never rewritten: Claude's
+/// credential store derives account identity from the literal path.
+public enum ProfileStore {
+    private typealias Failure = ProfileManager.ManagementError
+    private static let maximumBytes = 2_097_152
+    /// How long a read or change waits for another Claudock process before reporting it is busy.
+    private static let lockWait: TimeInterval = 5
+
+    public static func directory(home: String = NSHomeDirectory()) -> URL {
+        URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/Claudock", isDirectory: true)
+    }
+
+    /// Launches and listings only read, so they share the registry lock and never wait for one
+    /// another. A missing registry or a pending migration is written under the exclusive lock.
+    public static func load(home: String = NSHomeDirectory()) throws -> [Profile] {
+        if let profiles = try readShared(home: home) { return profiles }
+        return try withState(home: home) { state in state.profiles }
+    }
+
+    /// Data-only input for the optional zsh adapter. Prompt hooks must not create
+    /// a registry, discover shell files, read credentials, or rewrite account state.
+    public static func shellProfileNames(home: String = NSHomeDirectory()) throws -> [String] {
+        let snapshot = try Snapshot(directory(home: home).appendingPathComponent("profiles.json"))
+        guard let data = snapshot.data else { return [] }
+        guard let state = try? JSONDecoder().decode(State.self, from: data) else { throw Failure.invalidManagedFiles }
+        try validate(state)
+        return sorted(state.profiles).filter {
+            $0.managed && !$0.isVertex && $0.discoveryNote == nil && $0.command != "claude"
+        }.map(\.command)
+    }
+
+    /// Merge newly discovered wrappers without reintroducing removed/renamed profiles.
+    /// Existing registry records are authoritative; same-name or same-credential-store imports are skipped.
+    public static func importShellProfiles(home: String = NSHomeDirectory()) throws -> [Profile] {
+        try withState(home: home) { state in
+            let discovered = ProfileDiscovery.discover(home: home)
+            reconcileExternalImports(discovered, state: &state)
+            for candidate in discovered where !candidate.isVertex {
+                guard acceptsDiscovered(candidate) else { continue }
+                guard !state.suppressedCommands.contains(candidate.command),
+                      !isSuppressedDirectory(candidate, state: state),
+                      !state.profiles.contains(where: { $0.command == candidate.command }),
+                      !state.profiles.contains(where: { sameCredentialIdentity($0, candidate) }) else { continue }
+                state.profiles.append(imported(candidate))
+            }
+            state.profiles = sorted(state.profiles)
+            return state.profiles
+        }
+    }
+
+    public static func add(name: String, configDirectory: String? = nil, home: String = NSHomeDirectory()) throws -> Profile {
+        try add(name: name, configDirectory: configDirectory, authKind: .subscription, home: home, beforePublishing: { _ in })
+    }
+
+    /// The key is saved in Keychain before the new registry entry is published. If saving or
+    /// publishing fails, the entry and any account folder created for it are rolled back, and so
+    /// is a Keychain item this attempt created; an item that already existed is kept.
+    public static func addAPIKeyProfile(name: String, apiKey: ConsoleAPIKey, configDirectory: String? = nil,
+                                        home: String = NSHomeDirectory()) throws -> Profile {
+        try addAPIKeyProfile(name: name, apiKey: apiKey, configDirectory: configDirectory, home: home,
+                             isSaved: APIKeyStore.isSaved, save: APIKeyStore.save, delete: { APIKeyStore.delete(profile: $0) })
+    }
+
+    static func addAPIKeyProfile(name: String, apiKey: ConsoleAPIKey, configDirectory: String?, home: String,
+                                 isSaved: (Profile) throws -> Bool, save: (ConsoleAPIKey, Profile) throws -> Void,
+                                 delete: (Profile) -> Void) throws -> Profile {
+        var created: Profile?
+        do {
+            return try add(name: name, configDirectory: configDirectory, authKind: .apiKey, home: home) { profile in
+                if try !isSaved(profile) { created = profile }
+                try save(apiKey, profile)
+            }
+        } catch {
+            if let created { delete(created) }
+            throw error
+        }
+    }
+
+    /// A profile for a third-party endpoint, pinned to one model. Like an API-key profile, its key is saved in Keychain
+    /// before the entry is published, and a failed add rolls back the entry, its account folder, and an item it created.
+    public static func addEndpointProfile(name: String, endpoint: EndpointConfiguration, key: EndpointAPIKey,
+                                          home: String = NSHomeDirectory()) throws -> Profile {
+        try addEndpointProfile(name: name, endpoint: endpoint, key: key, home: home, isSaved: EndpointKeyStore.isSaved,
+                               save: EndpointKeyStore.save, delete: { EndpointKeyStore.delete(profile: $0) })
+    }
+
+    static func addEndpointProfile(name: String, endpoint: EndpointConfiguration, key: EndpointAPIKey, home: String,
+                                   isSaved: (Profile) throws -> Bool, save: (EndpointAPIKey, Profile) throws -> Void,
+                                   delete: (Profile) -> Void) throws -> Profile {
+        var created: Profile?
+        do {
+            return try add(name: name, configDirectory: nil, authKind: .endpoint, endpoint: endpoint, home: home) { profile in
+                if try !isSaved(profile) { created = profile }
+                try save(key, profile)
+            }
+        } catch {
+            if let created { delete(created) }
+            throw error
+        }
+    }
+
+    /// Points an endpoint profile at another endpoint or model, keeping its registry identity, name, config folder,
+    /// and so its key. A profile that changed meanwhile is refused.
+    @discardableResult
+    public static func setEndpoint(_ endpoint: EndpointConfiguration, for profile: Profile, home: String = NSHomeDirectory()) throws -> Profile {
+        guard profile.authKind.isEndpoint, profile.managed else { throw Failure.notEndpointProfile }
+        return try withState(home: home) { state in
+            let index = try currentIndex(profile, in: state)
+            let current = state.profiles[index]
+            let changed = Profile(command: current.command, configDirectory: current.configDirectory, isVertex: current.isVertex,
+                                  discoveryNote: current.discoveryNote, registryID: current.registryID, managed: current.managed,
+                                  authKind: current.authKind, endpoint: endpoint)
+            state.profiles[index] = changed
+            return changed
+        }
+    }
+
+    /// A profile that signs in to an Anthropic Console account through Claude Code (`claude auth login --console`).
+    /// Claude Code keeps the resulting API key, so nothing is saved before the entry is published.
+    public static func addConsoleLoginProfile(name: String, configDirectory: String? = nil, home: String = NSHomeDirectory()) throws -> Profile {
+        try add(name: name, configDirectory: configDirectory, authKind: .consoleLogin, home: home, beforePublishing: { _ in })
+    }
+
+    /// Switches a managed Console profile between a pasted API key and Claude Code's own Console sign-in, keeping
+    /// its registry identity, name, and config folder. Subscription profiles never change kind. `beforePublishing`
+    /// gets the switched profile before the registry is written (a new key is saved there); if it throws, nothing
+    /// changes. A profile that changed meanwhile is refused.
+    @discardableResult
+    public static func setAuthKind(_ kind: ProfileAuthKind, for profile: Profile, home: String = NSHomeDirectory(),
+                                   beforePublishing: (Profile) throws -> Void = { _ in }) throws -> Profile {
+        guard kind.isConsole, profile.authKind.isConsole, profile.managed else { throw Failure.unsupportedKindChange }
+        return try withState(home: home, beforePublishing: beforePublishing) { state in
+            let index = try currentIndex(profile, in: state)
+            let current = state.profiles[index]
+            let switched = Profile(command: current.command, configDirectory: current.configDirectory, isVertex: current.isVertex,
+                                   discoveryNote: current.discoveryNote, registryID: current.registryID, managed: current.managed,
+                                   authKind: kind, endpoint: current.endpoint)
+            state.profiles[index] = switched
+            return switched
+        }
+    }
+
+    static func add(name: String, configDirectory: String?, authKind: ProfileAuthKind, endpoint: EndpointConfiguration? = nil, home: String,
+                    beforePublishing: (Profile) throws -> Void) throws -> Profile {
+        let command = try validatedCommand(name)
+        let explicitDirectory = configDirectory.flatMap { $0.isEmpty ? nil : $0 }
+        if let path = explicitDirectory {
+            guard validPath(path) else { throw Failure.invalidDirectory }
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { throw Failure.invalidDirectory }
+        }
+        try SubscriptionConfiguration.validate(configDirectory: explicitDirectory ?? URL(fileURLWithPath: home).appendingPathComponent(".claude").path)
+        let identifier = UUID().uuidString
+        let accountParent = directory(home: home).appendingPathComponent("accounts", isDirectory: true).appendingPathComponent(identifier, isDirectory: true)
+        let path = explicitDirectory ?? accountParent.appendingPathComponent("claude", isDirectory: true).path
+        return try withState(home: home, createAccount: explicitDirectory == nil ? accountParent : nil, beforePublishing: beforePublishing) { state in
+            let profile = Profile(command: command, configDirectory: path, registryID: identifier, managed: true, authKind: authKind,
+                                  endpoint: endpoint)
+            guard !state.profiles.contains(where: { $0.command == command }) else { throw Failure.duplicateName }
+            guard !state.profiles.contains(where: { sameCredentialIdentity($0, profile) }) else { throw Failure.duplicateDirectory }
+            guard explicitDirectory != nil || !pathEntryExists(accountParent.path) else { throw Failure.directoryExists }
+            state.profiles.append(profile)
+            state.profiles = sorted(state.profiles)
+            // Explicitly adding an account is allowed after removal. Keep tombstones so
+            // the old external shell command cannot be imported as a second identity.
+            return profile
+        }
+    }
+
+    public static func rename(profile: Profile, to name: String, home: String = NSHomeDirectory()) throws -> Profile {
+        try requireEditable(profile)
+        let command = try validatedCommand(name)
+        guard validPath(profile.configDirectory), profile.discoveryNote == nil else { throw Failure.unresolvedProfile }
+        return try withState(home: home) { state in
+            let index = try currentIndex(profile, in: state)
+            if command == profile.command { return state.profiles[index] }
+            guard !state.profiles.contains(where: { $0.command == command }) else { throw Failure.duplicateName }
+            suppress(profile, in: &state)
+            let renamed = Profile(command: command, configDirectory: profile.configDirectory,
+                                  isVertex: profile.isVertex, discoveryNote: profile.discoveryNote,
+                                  registryID: state.profiles[index].registryID, managed: true, authKind: profile.authKind,
+                                  endpoint: profile.endpoint)
+            state.profiles[index] = renamed
+            state.profiles = sorted(state.profiles)
+            return renamed
+        }
+    }
+
+    /// Remove only the registry entry. Login credentials, history, config folders and
+    /// user-authored shell functions remain untouched.
+    public static func remove(profile: Profile, home: String = NSHomeDirectory()) throws {
+        try requireEditable(profile)
+        try withState(home: home) { state in
+            let index = try currentIndex(profile, in: state)
+            suppress(state.profiles[index], in: &state)
+            state.profiles.remove(at: index)
+        }
+    }
+
+    private struct State: Codable {
+        var version = 1
+        var profiles: [Profile]
+        var suppressedCommands: [String] = []
+        var suppressedDirectories: [String] = []
+        var subscriptionOnlyMigration: Int? = 1
+    }
+
+    private struct Snapshot {
+        let url: URL
+        let data: Data?
+
+        init(_ url: URL) throws {
+            self.url = url
+            guard pathEntryExists(url.path) else { data = nil; return }
+            let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+            guard descriptor >= 0 else { throw Failure.invalidManagedFiles }
+            let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            defer { try? handle.close() }
+            var status = stat()
+            guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+                  status.st_nlink == 1, status.st_uid == geteuid(), status.st_size <= maximumBytes else { throw Failure.invalidManagedFiles }
+            guard let contents = try handle.read(upToCount: maximumBytes + 1), contents.count <= maximumBytes else { throw Failure.invalidManagedFiles }
+            data = contents
+        }
+
+        func unchanged() -> Bool {
+            guard let current = try? Snapshot(url) else { return false }
+            return current.data == data
+        }
+    }
+
+    /// Carries an error from `beforePublishing` past the generic I/O mapping below.
+    private struct PublicationFailure: Error { let underlying: Error }
+
+    private static func withState<T>(home: String, createAccount: URL? = nil, beforePublishing: (T) throws -> Void = { _ in },
+                                     operation: (inout State) throws -> T) throws -> T {
+        let base = directory(home: home)
+        do {
+            try ensureBase(base)
+            let descriptor = try lockDescriptor(base)
+            defer { _ = close(descriptor) }
+            try lock(descriptor, exclusive: true)
+            defer { _ = flock(descriptor, LOCK_UN) }
+            let snapshot = try Snapshot(base.appendingPathComponent("profiles.json"))
+            var state = try currentState(snapshot, home: home)
+            let result = try operation(&state)
+            let data = try serialized(&state)
+            guard snapshot.unchanged() else { throw Failure.concurrentChange }
+            // Prepare shared sessions/settings before publishing the new profile.
+            // Explicit folder imports pass no createAccount and remain untouched.
+            let workspace = try createAccount.map { try SharedProfileWorkspace.prepare(accountParent: $0, home: home) }
+            defer { workspace?.rollback() }
+            // Save what the new entry depends on (an API key) before publishing it. A failure
+            // leaves the registry unwritten and rolls back the prepared account folder.
+            do { try beforePublishing(result) } catch { throw PublicationFailure(underlying: error) }
+            try workspace?.validate()
+            guard snapshot.unchanged() else { throw Failure.concurrentChange }
+            if data != snapshot.data { try atomicWrite(data, to: snapshot.url) }
+            workspace?.commit()
+            return result
+        } catch let failure as Failure {
+            throw failure
+        } catch let failure as PublicationFailure {
+            throw failure.underlying
+        } catch {
+            throw Failure.ioFailure
+        }
+    }
+
+    /// Returns nil when the registry is missing or would change (a pending migration); the
+    /// caller then writes it under the exclusive lock. Writers cannot run while this holds the lock.
+    private static func readShared(home: String) throws -> [Profile]? {
+        let base = directory(home: home)
+        do {
+            try ensureBase(base)
+            let descriptor = try lockDescriptor(base)
+            defer { _ = close(descriptor) }
+            try lock(descriptor, exclusive: false)
+            defer { _ = flock(descriptor, LOCK_UN) }
+            let snapshot = try Snapshot(base.appendingPathComponent("profiles.json"))
+            guard let stored = snapshot.data else { return nil }
+            var state = try currentState(snapshot, home: home)
+            guard try serialized(&state) == stored else { return nil }
+            return state.profiles
+        } catch let failure as Failure {
+            throw failure
+        } catch {
+            throw Failure.ioFailure
+        }
+    }
+
+    private static func lockDescriptor(_ base: URL) throws -> Int32 {
+        let descriptor = open(base.appendingPathComponent(".registry-lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard descriptor >= 0 else { throw Failure.invalidManagedFiles }
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_mode & S_IFMT == S_IFREG,
+              status.st_nlink == 1, status.st_uid == geteuid(), fchmod(descriptor, 0o600) == 0 else {
+            _ = close(descriptor)
+            throw Failure.invalidManagedFiles
+        }
+        return descriptor
+    }
+
+    /// Reads share the lock and changes take it exclusively. Either waits up to `lockWait` for
+    /// the other, so parallel launches and a concurrent change all go through.
+    private static func lock(_ descriptor: Int32, exclusive: Bool) throws {
+        let deadline = Date().addingTimeInterval(lockWait)
+        while flock(descriptor, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK || errno == EINTR, Date() < deadline else { throw Failure.busy }
+            usleep(useconds_t.random(in: 10_000...30_000))
+        }
+    }
+
+    /// The stored registry, or one bootstrapped from shell discovery, with pending migrations applied in memory.
+    private static func currentState(_ snapshot: Snapshot, home: String) throws -> State {
+        var state: State
+        if let content = snapshot.data {
+            guard let decoded = try? JSONDecoder().decode(State.self, from: content) else { throw Failure.invalidManagedFiles }
+            state = decoded
+            try validate(state)
+        } else {
+            // The legacy overlay is imported by the same non-executing parser as
+            // ordinary wrappers. Its original config paths and scripts are retained.
+            state = State(profiles: ProfileDiscovery.discover(home: home).filter(acceptsDiscovered).map(imported))
+            try validate(state)
+        }
+        // Before 1.5.1, Bedrock/Foundry imports were not marked as external.
+        // Reconcile once using static declarations with the same name and
+        // literal config path; user-managed registrations remain authoritative.
+        if state.subscriptionOnlyMigration == nil {
+            reconcileExternalImports(ProfileDiscovery.discover(home: home), state: &state)
+            state.subscriptionOnlyMigration = 1
+        }
+        // Older versions listed external cloud providers even though they
+        // could not use subscription quota. Retire only their registrations;
+        // shared history, account folders, and external cloud auth stay intact.
+        for profile in state.profiles.filter({ $0.isVertex }) { suppress(profile, in: &state) }
+        state.profiles.removeAll { $0.isVertex }
+        return state
+    }
+
+    /// Validates the final state and returns the bytes a write would store.
+    private static func serialized(_ state: inout State) throws -> Data {
+        // Older builds accept only version 1 and would drop a Console profile's kind when rewriting the file; a
+        // registry holding one is version 2, so they refuse it instead. Builds that accept 1 and 2 cannot keep an
+        // endpoint profile either, so a registry holding one is version 3.
+        state.version = state.profiles.contains { $0.authKind.isEndpoint } ? 3 : state.profiles.contains { $0.authKind.isConsole } ? 2 : 1
+        try validate(state)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(state) + Data("\n".utf8)
+        guard data.count <= maximumBytes else { throw Failure.invalidManagedFiles }
+        return data
+    }
+
+    private static func imported(_ profile: Profile) -> Profile {
+        Profile(command: profile.command, configDirectory: profile.configDirectory, isVertex: profile.isVertex,
+                discoveryNote: profile.discoveryNote, registryID: UUID().uuidString, managed: false)
+    }
+
+    private static func acceptsDiscovered(_ profile: Profile) -> Bool {
+        guard !profile.isVertex else { return false }
+        // Keep the required default placeholder and unresolved subscriptions so
+        // users can repair sign-in/configuration rather than losing registration.
+        if profile.command == "claude" || profile.discoveryNote != nil { return true }
+        return (try? SubscriptionConfiguration.validate(configDirectory: profile.configDirectory)) != nil
+    }
+
+    private static func reconcileExternalImports(_ discovered: [Profile], state: inout State) {
+        let external = discovered.filter(\.isVertex)
+        let removed = state.profiles.filter { stored in
+            !stored.managed && stored.command != "claude" && external.contains {
+                $0.command == stored.command && $0.configDirectory == stored.configDirectory
+            }
+        }
+        for profile in removed { suppress(profile, in: &state) }
+        let ids = Set(removed.map(\.id))
+        state.profiles.removeAll { ids.contains($0.id) }
+    }
+
+    private static func sorted(_ profiles: [Profile]) -> [Profile] {
+        profiles.sorted {
+            if $0.command == $1.command { return false }
+            if $0.command == "claude" { return true }
+            if $1.command == "claude" { return false }
+            return $0.command.localizedStandardCompare($1.command) == .orderedAscending
+        }
+    }
+
+    private static func suppress(_ profile: Profile, in state: inout State) {
+        if !state.suppressedCommands.contains(profile.command) { state.suppressedCommands.append(profile.command) }
+        if !profile.configDirectory.isEmpty, !state.suppressedDirectories.contains(profile.configDirectory) { state.suppressedDirectories.append(profile.configDirectory) }
+        state.suppressedCommands.sort()
+        state.suppressedDirectories.sort()
+    }
+
+    private static func isSuppressedDirectory(_ profile: Profile, state: State) -> Bool {
+        guard !profile.isVertex, profile.discoveryNote == nil, validPath(profile.configDirectory) else { return false }
+        return state.suppressedDirectories.contains {
+            $0.precomposedStringWithCanonicalMapping == profile.configDirectory.precomposedStringWithCanonicalMapping
+        }
+    }
+
+    private static func sameCredentialIdentity(_ first: Profile, _ second: Profile) -> Bool {
+        // Claude hashes the NFC literal config path, not its physical directory.
+        // Symlink/case aliases may share files while retaining separate Keychain stores.
+        guard !first.isVertex, !second.isVertex, first.discoveryNote == nil, second.discoveryNote == nil,
+              validPath(first.configDirectory), validPath(second.configDirectory) else { return false }
+        return CredentialStore.serviceName(for: first) == CredentialStore.serviceName(for: second)
+    }
+
+    private static func currentIndex(_ profile: Profile, in state: State) throws -> Int {
+        guard let index = state.profiles.firstIndex(where: { $0.id == profile.id }),
+              state.profiles[index] == profile else { throw Failure.missingProfile }
+        return index
+    }
+
+    private static func validate(_ state: State) throws {
+        let ids = state.profiles.compactMap(\.registryID)
+        let commands = state.profiles.map(\.command)
+        guard [1, 2, 3].contains(state.version), state.profiles.count <= 1_000,
+              state.suppressedCommands.count <= 10_000, state.suppressedDirectories.count <= 10_000,
+              ids.count == state.profiles.count, Set(ids).count == ids.count,
+              ids.allSatisfy({ UUID(uuidString: $0) != nil }), Set(commands).count == commands.count,
+              commands.filter({ $0 == "claude" }).count == 1,
+              Set(state.suppressedCommands).count == state.suppressedCommands.count,
+              Set(state.suppressedDirectories).count == state.suppressedDirectories.count,
+              !state.suppressedCommands.contains("claude"),
+              commands.allSatisfy(validImportedCommand), state.suppressedCommands.allSatisfy(validImportedCommand),
+              state.suppressedDirectories.allSatisfy(validPath),
+              state.profiles.allSatisfy({ profile in
+                  (validPath(profile.configDirectory) || (profile.configDirectory.isEmpty && profile.discoveryNote != nil)) &&
+                  (profile.authKind == .subscription || profile.managed) && (profile.authKind == .endpoint) == (profile.endpoint != nil) &&
+                  (!profile.managed || (profile.command != "claude" && !profile.isVertex && profile.discoveryNote == nil && (try? validatedCommand(profile.name, allowLegacyAuto: true)) == profile.command))
+              }) else { throw Failure.invalidManagedFiles }
+    }
+
+    private static func validatedCommand(_ name: String, allowLegacyAuto: Bool = false) throws -> String {
+        guard name.caseInsensitiveCompare("default") != .orderedSame else { throw Failure.reservedName }
+        guard allowLegacyAuto || name.caseInsensitiveCompare("auto") != .orderedSame else { throw Failure.reservedName }
+        guard name.range(of: #"\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,39}\z"#, options: .regularExpression) != nil else { throw Failure.invalidName }
+        return "claude-" + name
+    }
+
+    private static func validImportedCommand(_ command: String) -> Bool {
+        if command == "claude" { return true }
+        return command.hasPrefix("claude-") && command.count > 7 && command.unicodeScalars.allSatisfy {
+            CharacterSet.alphanumerics.contains($0) || "_-".unicodeScalars.contains($0)
+        }
+    }
+
+    private static func validPath(_ path: String) -> Bool {
+        path.hasPrefix("/") && !path.contains("\0") && !path.contains("\n") && !path.contains("\r")
+    }
+
+    private static func requireEditable(_ profile: Profile) throws {
+        guard profile.command != "claude", !profile.isVertex else { throw Failure.protectedProfile }
+        guard validImportedCommand(profile.command) else { throw Failure.invalidName }
+    }
+
+    private static func ensureBase(_ base: URL) throws {
+        // User-controlled ancestors such as Library may already exist. Only Claudock's
+        // own directory is managed, and it must be a real private directory.
+        try FileManager.default.createDirectory(at: base.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try ensurePrivateDirectory(base)
+    }
+
+    private static func ensurePrivateDirectory(_ url: URL) throws {
+        if !pathEntryExists(url.path), mkdir(url.path, 0o700) != 0, errno != EEXIST { throw Failure.ioFailure }
+        var status = stat()
+        guard lstat(url.path, &status) == 0, status.st_mode & S_IFMT == S_IFDIR, status.st_uid == geteuid() else { throw Failure.invalidManagedFiles }
+        let descriptor = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        guard descriptor >= 0 else { throw Failure.invalidManagedFiles }
+        defer { _ = close(descriptor) }
+        guard fchmod(descriptor, 0o700) == 0 else { throw Failure.ioFailure }
+    }
+
+    private static func pathEntryExists(_ path: String) -> Bool {
+        var status = stat()
+        return lstat(path, &status) == 0
+    }
+
+    private static func atomicWrite(_ data: Data, to destination: URL) throws {
+        let temporary = destination.deletingLastPathComponent().appendingPathComponent(".profiles-\(UUID().uuidString).tmp")
+        let descriptor = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
+        guard descriptor >= 0 else { throw Failure.ioFailure }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close(); _ = unlink(temporary.path) }
+        try handle.write(contentsOf: data)
+        try handle.synchronize()
+        try handle.close()
+        guard Darwin.rename(temporary.path, destination.path) == 0 else { throw Failure.ioFailure }
+        let directoryDescriptor = open(destination.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        if directoryDescriptor >= 0 {
+            defer { _ = close(directoryDescriptor) }
+            _ = fsync(directoryDescriptor)
+        }
+    }
+}

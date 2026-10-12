@@ -2,22 +2,56 @@
 
 # Claudock
 
-A macOS menu bar app and `claudock` command for people with more than one Claude account. See every account's limits and Console credit side by side, then start Claude Code under the one you pick.
+A command-line tool for people with more than one Claude account. The `claudock` command manages profiles, reads subscription limits and Console credit, and starts or resumes Claude Code under the account you pick. An optional [macOS menu bar app](#optional-macos-app) shows the same profiles and readings.
 
-[Download v1.7.0](https://github.com/laneboss-io/claudock/releases/download/v1.7.0/Claudock-1.7.0-macOS-arm64.dmg) · [User guide](docs/GUIDE.md) · [Release notes](https://github.com/laneboss-io/claudock/releases/tag/v1.7.0)
-
-> This is v1.7.0, a preview for Apple Silicon and macOS 14 or newer. It is ad-hoc signed and not Apple-notarized. No Xcode is needed to run the app.
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/accounts.png">
-  <img src="docs/screenshots/accounts-light.png" width="620" alt="Claudock dashboard in demo mode. personal is a Max 20× subscription with 5-hour, Weekly, and Fable bars at 82%, 41%, and 67% used. console is a Console API key with a credit meter reading $187.42 left of $200.00. team is a Console sign-in profile with no credit set. studio is a Team Premium subscription at its 5-hour limit, marked Full.">
-</picture>
-
-*Synthetic demo profiles. Percentages show allowance used. The console and team rows are Console profiles.*
+[User guide](docs/GUIDE.md) · [Command cheat sheet](#command-cheat-sheet) · [Development guide](CONTRIBUTING.md)
 
 ## Install
 
-You need an Apple Silicon Mac with macOS 14 or newer, and [Claude Code](https://code.claude.com/docs/en/setup) to sign in and to start sessions.
+The CLI requires macOS 14 or newer and Swift 6 or newer to build. Install [Claude Code](https://code.claude.com/docs/en/setup) to sign in and start sessions. Apple Silicon is validated; Intel is unverified.
+
+From a source checkout:
+
+```sh
+git clone https://github.com/laneboss-io/claudock.git
+cd claudock
+./scripts/install-cli.sh
+export PATH="$HOME/.local/bin:$PATH"
+claudock --help
+```
+
+The installer builds only the root `claudock` product in release mode and copies it to `~/.local/bin/claudock`. It needs no sudo and builds no app. Add the prefix directory to your shell's `PATH` for future Terminal tabs. To choose another binary directory, pass it as the first argument:
+
+```sh
+./scripts/install-cli.sh "$HOME/bin"
+```
+
+The prefix is the directory that receives `claudock` directly; the installer does not append another `bin` directory. To build without installing, run `xcrun swift build --product claudock` at the repository root. The optional app has its own Swift package in [`macos/`](macos/README.md).
+
+## Commands
+
+```sh
+claudock profile list
+claudock profile add work
+claudock profile login work
+claudock run work
+claudock run work -- --resume
+claudock usage --max-age 600
+claudock available --names --max-age 600
+claudock version
+```
+
+`run` starts Claude Code in the current directory. Put Claude Code arguments after `--`; `--resume` opens its session picker. Profiles share your default Claude history, settings, plugins, and skills while keeping separate logins. See [account types](#add-your-accounts), [cached readings](#cached-readings-and-rate-limits), and the complete [command cheat sheet](#command-cheat-sheet).
+
+Installing the CLI gives you the command through `PATH`. [Shell integration](#shell-integration-optional) is an additional option for `claude-NAME` shortcuts.
+
+## Optional macOS app
+
+The menu bar app is an extension of the CLI. Both use the same local registry, preferences, and usage cache. You can build and install the CLI independently.
+
+[Download app v1.7.0](https://github.com/laneboss-io/claudock/releases/download/v1.7.0/Claudock-1.7.0-macOS-arm64.dmg) · [Release notes](https://github.com/laneboss-io/claudock/releases/tag/v1.7.0) · [ZIP archive](https://github.com/laneboss-io/claudock/releases/download/v1.7.0/Claudock-1.7.0-macOS-arm64.zip) · [SHA256 checksums](https://github.com/laneboss-io/claudock/releases/download/v1.7.0/Claudock-1.7.0-SHA256SUMS.txt)
+
+> The v1.7.0 app is a preview for Apple Silicon and macOS 14 or newer. It is ad-hoc signed and not Apple-notarized. No Xcode is needed to run the downloaded app.
 
 1. Open the downloaded DMG and drag **Claudock.app** to **Applications**.
 2. Open Claudock from Applications. This build is not notarized, so macOS may block it. Follow [Apple's instructions for opening an unnotarized app](https://support.apple.com/en-us/102445). After you try to open it, approve it under **System Settings → Privacy & Security → Open Anyway**.
@@ -25,22 +59,26 @@ You need an Apple Silicon Mac with macOS 14 or newer, and [Claude Code](https://
 
 Click elsewhere to close the popover. The window icon in its header opens the same dashboard in a regular window. Closing that window leaves the menu bar app running.
 
-Terminal commands in this README start with `claudock`. That command exists in new Terminal tabs once you turn on [shell integration](#shell-integration-optional). Until then, type the app's path in its place: `'/Applications/Claudock.app/Contents/MacOS/claudock'`.
+The app also includes a CLI at `Claudock.app/Contents/MacOS/claudock` for existing callers. If you installed only the app, use `'/Applications/Claudock.app/Contents/MacOS/claudock'` in place of `claudock`, or enable shell integration from the app.
 
-Also available: [ZIP archive](https://github.com/laneboss-io/claudock/releases/download/v1.7.0/Claudock-1.7.0-macOS-arm64.zip) and [SHA256 checksums](https://github.com/laneboss-io/claudock/releases/download/v1.7.0/Claudock-1.7.0-SHA256SUMS.txt).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/accounts.png">
+  <img src="docs/screenshots/accounts-light.png" width="620" alt="Claudock dashboard in demo mode, showing synthetic subscription limits and Console credit.">
+</picture>
+
+*Synthetic demo profiles. Percentages show allowance used. The console and team rows are Console profiles.*
 
 <details>
-<summary>Build from source</summary>
+<summary>Build the optional app from source</summary>
 
 Building needs full Xcode 16 or newer. Open Xcode once to finish its setup, then run:
 
 ```sh
-git clone https://github.com/laneboss-io/claudock.git
-cd claudock
-./scripts/bootstrap.sh
+./scripts/build-app.sh dist/development
+open 'dist/development/Claudock.app'
 ```
 
-You can also double-click **Bootstrap.command**. Bootstrap checks the toolchain, runs the tests, builds Claudock, and opens it. Quit the app, move it from `dist/Build.*/` to Applications, and open it again.
+The script builds the CLI from the root and the app from `macos/`, then packages both in the same bundle layout. Choose a fresh output directory for each build. You can also run `./scripts/bootstrap.sh` or double-click **Bootstrap.command** to check the toolchain, run the tests, build the optional app, and open it. Quit the app before moving it to Applications.
 
 The build targets your Mac's architecture. Apple Silicon is validated; Intel is unverified. See the [development guide](CONTRIBUTING.md) and the [build and release details](docs/RELEASING.md).
 
@@ -48,7 +86,7 @@ The build targets your Mac's architecture. Apple Silicon is validated; Intel is 
 
 ## Add your accounts
 
-Claudock has four kinds of profile. Pick the one that matches how the account is billed.
+Claudock has four kinds of profile. Pick the one that matches how the account is billed. The commands below work with the standalone CLI; the optional app offers profile management too.
 
 | Kind | Billed to | The dashboard shows |
 | --- | --- | --- |
@@ -459,7 +497,7 @@ Quota reading still uses the profile's normal login. A re-login warning in the d
 
 ## Shell integration (optional)
 
-The app works without it, and so does the CLI through its full path. To get the `claudock` command and `claude-NAME` shortcuts in zsh, open **Manage profiles**, turn on **Enable claudock in zsh**, and open a new Terminal tab. Put the app in its final location first.
+The installed CLI works through `PATH` without shell integration. To add `claude-NAME` shortcuts in zsh, run `claudock shell enable` and open a new Terminal tab. In the optional app, the same setting is **Manage profiles → Enable claudock in zsh**. Enable it from the executable's final location: integration records the CLI path used to enable it.
 
 - It adds the `claudock` command and a shortcut for each profile, such as `claude-work`.
 - It writes `init.zsh` and an `integration.json` record in `~/.config/claudock/`, and adds one marked loader block to `.zshrc`, after backing up an existing file.
@@ -549,7 +587,7 @@ Claudock is an independent open-source project, unaffiliated with Anthropic. Liv
 
 [Report a bug](https://github.com/laneboss-io/claudock/issues) with what you clicked, what you expected, and your macOS and Claude Code versions. Use demo screenshots or redact account details. Report security issues through the [private reporting guidance](SECURITY.md).
 
-Contributions to accessibility, profile discovery, and compatibility are welcome. The app uses SwiftUI and AppKit, with no third-party Swift package dependencies. Read the [contribution guide](CONTRIBUTING.md) and the [architecture notes](docs/ARCHITECTURE.md).
+Contributions to profile discovery, compatibility, and accessibility are welcome. The root Swift package contains the CLI, `UsageCore`, and core tests. The optional app in `macos/` uses SwiftUI and AppKit and depends on that core by relative path. There are no third-party Swift package dependencies. Read the [contribution guide](CONTRIBUTING.md) and the [architecture notes](docs/ARCHITECTURE.md).
 
 ## License
 

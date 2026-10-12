@@ -1,21 +1,31 @@
 # Contributing
 
-Claudock is a native macOS utility. Contributions should make many-account workflows easier while keeping profile credentials and shell configuration safe.
+Claudock is a CLI for macOS with an optional menu bar app. Contributions should make many-account workflows easier while keeping profile credentials and shell configuration safe.
 
 ## Local development
 
 Use macOS 14 or newer and a full Xcode 16 or newer installation. There are no third-party Swift package dependencies.
 
 ```sh
+xcrun swift build
 xcrun swift test
 python3 Tests/CLIIntegration/check.py
+./scripts/install-cli.sh /tmp/claudock-development/bin
+```
+
+The root package builds only the CLI and core. The installer takes a binary directory as its optional prefix and defaults to `~/.local/bin`; use a temporary prefix when testing it. For a custom Xcode installation, export its `Contents/Developer` path as `DEVELOPER_DIR`.
+
+To build the optional macOS extension:
+
+```sh
+xcrun swift build --package-path macos
 ./scripts/build-app.sh dist/development
 open 'dist/development/Claudock.app'
 ```
 
-Choose a fresh output directory for each package build, or move your previous app first. The build script intentionally refuses to overwrite a bundle. For a custom Xcode installation, export its `Contents/Developer` path as `DEVELOPER_DIR`.
+Choose a fresh output directory for each app bundle build, or move your previous app first. The build script intentionally refuses to overwrite a bundle and retains both executables under `Contents/MacOS/`.
 
-Core logic belongs in `Sources/UsageCore`; UI and macOS integration belong in `Sources/ClaudeUsage`; the bundled command-line entry point is `Sources/ClaudockCLI`. The historical GUI source-directory name and bundle identifier are retained during the Claudock migration. Keep I/O injectable or isolate it so tests can use temporary directories and synthetic data. Do not run a test against real profiles, credentials, shell files, or live usage endpoints.
+Core logic belongs in `Sources/UsageCore`; the command-line entry point is `Sources/ClaudockCLI`; UI and app integration belong in `macos/Sources/ClaudeUsage`. `macos/Package.swift` depends on the root's exported `UsageCore` library by relative path. The historical GUI target name and bundle identifier are retained. Keep I/O injectable or isolate it so tests can use temporary directories and synthetic data. Do not run a test against real profiles, credentials, shell files, or live usage endpoints.
 
 The CLI smoke harness compiles the exact CLI, `Profile`, and `LaunchCommand` sources against synthetic storage, executable-discovery, credentials, network, and shell boundaries. It exercises literal argument forwarding, the current directory, exit-status propagation, authentication environment isolation, and malformed commands without accessing real accounts. Temporary binaries stay under `.build/` and are removed afterward. Its printed source hashes identify the checked code; it does not establish real authentication or live quota compatibility. It also keeps README.md honest. Every `claudock` command in the README's shell code blocks (`sh`, `bash`, `zsh`, `shell`, or `console`) must be accepted by the CLI parser, with standard input empty. Usage lines, such as the README's command cheat sheet repeats from `claudock help`, expand to each form they allow, with placeholders such as `NAME` replaced by synthetic values; other examples run as written. The code blocks must show every usage line of `claudock help`, and every relative link, image, and heading anchor must exist with the exact letter case. Inline code in prose and tables is not run. Change the README and the CLI together.
 
@@ -37,7 +47,7 @@ Demo mode opens an ordinary dashboard window with synthetic accounts, limits, an
 
 Before submitting:
 
-- Run `xcrun swift test`, validate CLI help and malformed arguments without touching real profiles, and package both executables.
+- Build and test the root package, validate CLI help and malformed arguments without touching real profiles, and test the installer with a temporary prefix. For app changes, also build `macos/` and package both executables.
 - Test registry CRUD and optional shell integration independently. Profile changes must leave `.zshrc` unchanged, and disabling integration must preserve unrelated shell content and existing Claude wrappers.
 - Check the app opens and the changed interaction works on your Mac.
 - Keep logs, crash reports, screenshots, and test fixtures free of personal data and credentials.

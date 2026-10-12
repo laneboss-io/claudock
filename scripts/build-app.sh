@@ -31,40 +31,24 @@ cd "$ROOT"
 # source folders, which can invalidate an active build database or signature.
 STAGE=$(mktemp -d "${TMPDIR:-/private/tmp}/claudock-app.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
-xcrun swift build -c release --scratch-path "$STAGE/build"
-BINARY_DIR=$(xcrun swift build -c release --scratch-path "$STAGE/build" --show-bin-path)
+export CLANG_MODULE_CACHE_PATH="$STAGE/.mc"
+BUILD_FLAGS=(--cache-path "$STAGE/.swiftpm-cache" --config-path "$STAGE/.swiftpm-config"
+    --security-path "$STAGE/.swiftpm-security" -Xswiftc -module-cache-path -Xswiftc "$STAGE/.mc")
+xcrun swift build --package-path "$ROOT" -c release --product claudock --scratch-path "$STAGE/cli-build" "${BUILD_FLAGS[@]}"
+CLI_BINARY_DIR=$(xcrun swift build --package-path "$ROOT" -c release --scratch-path "$STAGE/cli-build" "${BUILD_FLAGS[@]}" --show-bin-path)
+xcrun swift build --package-path "$ROOT/macos" -c release --product ClaudockApp --scratch-path "$STAGE/app-build" "${BUILD_FLAGS[@]}"
+APP_BINARY_DIR=$(xcrun swift build --package-path "$ROOT/macos" -c release --scratch-path "$STAGE/app-build" "${BUILD_FLAGS[@]}" --show-bin-path)
 BUNDLE="$STAGE/Claudock.app"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
-cp "$BINARY_DIR/ClaudockApp" "$BUNDLE/Contents/MacOS/ClaudockApp"
-cp "$BINARY_DIR/claudock" "$BUNDLE/Contents/MacOS/claudock"
+cp "$APP_BINARY_DIR/ClaudockApp" "$BUNDLE/Contents/MacOS/ClaudockApp"
+cp "$CLI_BINARY_DIR/claudock" "$BUNDLE/Contents/MacOS/claudock"
 cp "$ROOT/LICENSE" "$BUNDLE/Contents/Resources/License.txt"
 chmod 755 "$BUNDLE/Contents/MacOS/ClaudockApp" "$BUNDLE/Contents/MacOS/claudock"
 # Remove local object-file paths from release debug maps before signing.
 # Keep executable code, Swift metadata, and exported symbols intact.
 xcrun strip -S "$BUNDLE/Contents/MacOS/ClaudockApp" "$BUNDLE/Contents/MacOS/claudock"
 
-cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key><string>en</string>
-    <key>CFBundleDisplayName</key><string>Claudock</string>
-    <key>CFBundleExecutable</key><string>ClaudockApp</string>
-    <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>CFBundleIdentifier</key><string>io.github.claudeusage.ClaudeUsage</string>
-    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-    <key>CFBundleName</key><string>Claudock</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.7.0</string>
-    <key>CFBundleVersion</key><string>13</string>
-    <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>LSUIElement</key><true/>
-    <key>NSHighResolutionCapable</key><true/>
-    <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Claudock contributors. MIT License.</string>
-</dict>
-</plist>
-PLIST
+cp "$ROOT/macos/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 
 xcrun swift -module-cache-path "$STAGE/icon-module-cache" "$ROOT/scripts/make-icon.swift" "$STAGE/Claudock.iconset"
 /usr/bin/iconutil -c icns "$STAGE/Claudock.iconset" -o "$BUNDLE/Contents/Resources/AppIcon.icns"

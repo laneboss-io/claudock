@@ -4,7 +4,7 @@ Use this checklist for a versioned source or macOS app release. The project prov
 
 ## Prepare an immutable candidate
 
-- Set the app version and build number in `scripts/build-app.sh`, and keep the request User-Agent/version text consistent where applicable.
+- Set the app version and build number in `macos/Resources/Info.plist`, and keep the CLI version and request User-Agent/version text consistent where applicable.
 - Preserve `io.github.claudeusage.ClaudeUsage` for this project's Claudock migration so existing preferences and login-item identity survive. A separately branded fork must choose its own identifier and update the shared GUI/CLI preference domain before its first release.
 - Record the candidate commit, macOS version, Xcode/Swift version, and build architecture. Keep release notes and screenshots free of account identities, paths, transcripts, and credentials.
 - Review changes to discovery, credential isolation, shell mutations, session continuation, and packaging against that exact candidate. If code changes after review, repeat the affected review and checks.
@@ -15,8 +15,13 @@ On macOS 14 or newer with full Xcode 16 or newer, run:
 
 ```sh
 xcrun swift --version
+xcrun swift build
 xcrun swift test
 python3 Tests/CLIIntegration/check.py
+./scripts/install-cli.sh /tmp/claudock-release-check/bin
+'/tmp/claudock-release-check/bin/claudock' --help
+'/tmp/claudock-release-check/bin/claudock' version
+xcrun swift build --package-path macos
 ./scripts/build-app.sh dist/release-check
 codesign --verify --strict --verbose=2 'dist/release-check/Claudock.app/Contents/MacOS/claudock'
 codesign --verify --strict --verbose=2 'dist/release-check/Claudock.app'
@@ -25,7 +30,7 @@ lipo -archs 'dist/release-check/Claudock.app/Contents/MacOS/ClaudockApp'
 'dist/release-check/Claudock.app/Contents/MacOS/claudock' version
 ```
 
-Use a fresh output directory; the packaging script refuses to replace an existing app. For a custom Xcode installation, set `DEVELOPER_DIR` to its `Contents/Developer` directory. The package has no third-party Swift dependencies. This is a reproducible procedure, not a claim of byte-identical binaries across different toolchains or signing times.
+The standalone CLI builds and installs from the root without the app. The installer receives a binary directory as its prefix; always use a temporary prefix for release checks. The optional app builds from `macos/`, which depends on the root core library, and packaging retains `Contents/MacOS/claudock` for existing callers. Use a fresh app output directory; the packaging script refuses to replace an existing app. For a custom Xcode installation, set `DEVELOPER_DIR` to its `Contents/Developer` directory. Neither package has third-party Swift dependencies. This is a reproducible procedure, not a claim of byte-identical binaries across different toolchains or signing times.
 
 The bundle includes the MIT license. Before signing, the build removes debug-map symbols with `strip -S` so release executables do not expose local object-file paths. Executable code sections, Swift runtime metadata, and exported symbols remain present.
 

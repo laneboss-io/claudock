@@ -1,6 +1,8 @@
 # Architecture
 
-Claudock is a Swift package with a macOS menu bar executable (`ClaudockApp`), a bundled CLI (`claudock`), and a separately testable core. Both executables use the same registry and launch validation. Its primary interface is a SwiftUI view inside a transient AppKit `NSPopover`, anchored to an `NSStatusItem`. Clicking outside dismisses the popover. An explicit window action opens the same dashboard in an ordinary closable, minimizable, resizable `NSWindow`. The app bundle uses `LSUIElement` so it behaves as a menu bar utility without a permanent Dock icon.
+Claudock's primary product is the `claudock` CLI. The root `Package.swift` contains its `ClaudockCLI` executable target, the exported `UsageCore` library, and `UsageCoreTests`; it has no app target. The optional macOS extension has its own `macos/Package.swift`, with the `ClaudeUsage` executable target and `ClaudockApp` product, and depends on the root's `UsageCore` library by relative path. App sources live in `macos/Sources/ClaudeUsage`; a future WidgetKit widget will live in `macos/` too.
+
+Both executables use the same registry and launch validation. The optional app presents a SwiftUI view inside a transient AppKit `NSPopover`, anchored to an `NSStatusItem`. Clicking outside dismisses the popover. An explicit window action opens the same dashboard in an ordinary closable, minimizable, resizable `NSWindow`. The app bundle uses `LSUIElement` so it behaves as a menu bar utility without a permanent Dock icon.
 
 ## Components
 
@@ -157,7 +159,9 @@ The zsh reader is a constrained static parser, not a complete shell interpreter.
 
 ## Packaging and verification
 
-`scripts/bootstrap.sh` validates the build environment, runs tests, packages into a fresh output directory, and opens the app. `scripts/build-app.sh` builds the current architecture, stages a bundle in the private system temporary directory, generates an AppKit icon, adds the plist, signs the bundled CLI and then the containing app, and verifies both signatures. Staging uses private permissions; public app directories, executable, and resource permissions are normalized before signing so a caller's permissive umask cannot make the app group/world-writable. It refuses to overwrite an existing destination app. Release signing and notarization require the maintainer's own Apple credentials.
+`scripts/install-cli.sh` builds only the root `claudock` product in release mode in a temporary scratch directory and installs it directly into a prefix directory (default `~/.local/bin`). It needs no sudo and builds no app.
+
+`scripts/bootstrap.sh` is an optional app workflow: it validates the build environment, runs root tests, packages into a fresh output directory, and opens the app. `scripts/build-app.sh` builds the root CLI and the `macos/` app separately for the current architecture, stages a bundle in the private system temporary directory, generates an AppKit icon, copies `macos/Resources/Info.plist`, signs the bundled CLI and then the containing app, and verifies both signatures. The bundle keeps `Contents/MacOS/ClaudockApp` and `Contents/MacOS/claudock`, so existing absolute CLI paths continue to work. Staging uses private permissions; public app directories, executable, and resource permissions are normalized before signing so a caller's permissive umask cannot make the app group/world-writable. It refuses to overwrite an existing destination app. Release signing and notarization require the maintainer's own Apple credentials.
 
 Unit tests should use temporary homes and synthetic account responses. App interaction, real Keychain permissions, real Claude authentication, upstream compatibility, signing/notarization, and a packaged launch are distinct checks; a unit-test pass does not establish all of them. CI packages a local-build artifact and does not publish a public release.
 

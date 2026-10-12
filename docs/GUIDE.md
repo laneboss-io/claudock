@@ -1,6 +1,6 @@
 # Claudock user guide
 
-A native Mac menu bar app that puts your Claude Code accounts in one place. Check subscription limits, explore recorded token activity, continue a saved session with another profile, and manage profiles from one app-owned registry. Optional shell integration adds `claudock` and missing `claude-{profile}` shortcuts while preserving the commands you already use.
+The `claudock` CLI puts your Claude Code accounts in one place. Manage profiles, check subscription limits and Console credit, and start or resume Claude Code under the profile you choose. An optional Mac menu bar app shares its registry and readings and adds dashboards for recorded token activity and saved sessions. Optional shell integration adds missing `claude-{profile}` shortcuts while preserving the commands you already use.
 
 Built with SwiftUI and AppKit, with no third-party package dependencies. Requires macOS 14 or newer.
 
@@ -14,9 +14,20 @@ Each account row has **Open in Terminal** to start that profile and **Copy** to 
 
 ## Get started
 
-For a packaged build, open **Claudock.app** and move it to **Applications**. No Xcode is needed to run the app. A local or CI build is signed ad hoc and is not notarized; it does not have the Gatekeeper trust of a Developer ID signed, notarized release. Only open a downloaded build from a source you trust, using macOS's standard **Privacy & Security → Open Anyway** flow if needed.
+To install the CLI from a source checkout with Swift 6 or newer, run:
 
-To build from source, install **Xcode 16 or newer**, open Xcode once to finish setup, then double-click **Bootstrap.command**. Or run this from the repository:
+```sh
+./scripts/install-cli.sh
+export PATH="$HOME/.local/bin:$PATH"
+claudock --help
+claudock profile list
+```
+
+The installer builds only the CLI in release mode, then installs `~/.local/bin/claudock` without sudo. Pass another binary directory as its first argument to choose a prefix; it receives the binary directly. Add that directory to `PATH` for future Terminal tabs. The root package has no app target. Start a subscription profile with `claudock profile add work`, `claudock profile login work`, and `claudock run work`; resume with `claudock run work -- --resume`. The [README command cheat sheet](../README.md#command-cheat-sheet) lists all commands.
+
+The menu bar app is optional. For a packaged app build, open **Claudock.app** and move it to **Applications**. No Xcode is needed to run the downloaded app. A local or CI build is signed ad hoc and is not notarized; it does not have the Gatekeeper trust of a Developer ID signed, notarized release. Only open a downloaded build from a source you trust, using macOS's standard **Privacy & Security → Open Anyway** flow if needed.
+
+To build the optional app from source, install **Xcode 16 or newer**, open Xcode once to finish setup, then double-click **Bootstrap.command**. Or run this from the repository:
 
 ```sh
 ./scripts/bootstrap.sh
@@ -143,7 +154,7 @@ claudock profile set-credit console 200
 claudock profile add team --console
 ```
 
-The namespaced command and generated shortcuts call the CLI bundled inside the app. Shortcuts forward the full profile selector, such as `claude-office`, so similarly named profiles remain distinct. The internal `claudock shell profile-names` helper reads the existing registry and emits selectors as data; it does not discover accounts, create or write the registry, access credentials, or make network requests.
+The namespaced command and generated shortcuts call the CLI used to enable integration: either your standalone installation or the copy bundled inside the optional app. Shortcuts forward the full profile selector, such as `claude-office`, so similarly named profiles remain distinct. The internal `claudock shell profile-names` helper reads the existing registry and emits selectors as data; it does not discover accounts, create or write the registry, access credentials, or make network requests.
 
 Disabling integration removes Claudock's marked loader block and managed integration files. Open a new Terminal tab afterward to unload its functions and hooks; already-open shells retain what they loaded. Existing user shell declarations remain unchanged.
 
@@ -326,13 +337,16 @@ There is no analytics service, telemetry, or developer-operated backend. Automat
 ## Development and builds
 
 ```sh
+xcrun swift build
 xcrun swift test
 python3 Tests/CLIIntegration/check.py
+./scripts/install-cli.sh /tmp/claudock-development/bin
+xcrun swift build --package-path macos
 ./scripts/build-app.sh
 open 'dist/Claudock.app'
 ```
 
-`build-app.sh` accepts an output directory and refuses to overwrite an existing `Claudock.app`. It builds both `ClaudockApp` and `claudock`, stages them inside the app under `.build/`, generates an AppKit vector icon, validates the plist, signs the bundled CLI before signing the app, and verifies both signatures. The package uses Swift tools 6.0 and Swift 5 language mode. The GitHub Actions workflow tests and packages on macOS 15 and retains an app ZIP as a build artifact. CI does not publish releases.
+The root Swift package builds the CLI and `UsageCore` and holds the core tests. The installer builds only the release CLI; use a temporary prefix when testing it. The optional app has its own package in `macos/` and depends on the root core library by relative path. `build-app.sh` accepts an output directory and refuses to overwrite an existing `Claudock.app`. It builds the root `claudock` and `macos/`'s `ClaudockApp` separately, stages both under `Contents/MacOS/` in a private system temporary directory, generates an AppKit vector icon, copies and validates the plist, signs the bundled CLI before signing the app, and verifies both signatures. Both packages use Swift tools 6.0 and Swift 5 language mode. The GitHub Actions workflow tests and packages on macOS 15 and retains an app ZIP as a build artifact. CI does not publish releases.
 
 Build and prepare releases outside cloud-synced folders. Some file providers attach Finder metadata to `.app` bundles after a build, causing a later signature check to fail even when packaging passed. The build removes disallowed metadata from its new bundle before signing and checks the final path, but cannot prevent subsequent changes by other software. Apple's [code-signing guidance](https://developer.apple.com/library/archive/qa/qa1940/_index.html) explains this error.
 

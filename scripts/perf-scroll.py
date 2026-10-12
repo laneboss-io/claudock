@@ -47,8 +47,8 @@ if "DEVELOPER_DIR" not in TOOLCHAIN and Path("/Applications/Xcode.app/Contents/D
 
 def binary_path(build):
     if build:
-        subprocess.run(["xcrun", "swift", "build", "-c", "release", "--product", "ClaudockApp"], cwd=ROOT, env=TOOLCHAIN, check=True)
-    bin_path = subprocess.run(["xcrun", "swift", "build", "-c", "release", "--show-bin-path"], cwd=ROOT, env=TOOLCHAIN,
+        subprocess.run(["xcrun", "swift", "build", "--package-path", "macos", "-c", "release", "--product", "ClaudockApp"], cwd=ROOT, env=TOOLCHAIN, check=True)
+    bin_path = subprocess.run(["xcrun", "swift", "build", "--package-path", "macos", "-c", "release", "--show-bin-path"], cwd=ROOT, env=TOOLCHAIN,
                               check=True, capture_output=True, text=True).stdout.strip()
     return Path(bin_path) / "ClaudockApp"
 

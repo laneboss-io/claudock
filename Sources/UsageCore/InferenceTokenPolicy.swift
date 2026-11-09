@@ -8,6 +8,7 @@ public enum LaunchCredential: Equatable, Sendable {
     case consoleLogin
     /// A third-party endpoint profile's key, read from Keychain at launch and passed with the endpoint's settings.
     case endpointKey
+    case vertex
     /// A subscription profile's inference token, passed as `CLAUDE_CODE_OAUTH_TOKEN`.
     case inferenceToken(String)
     /// No token: Claude Code uses the profile's own login.
@@ -68,6 +69,7 @@ public enum InferenceTokenPolicy {
     static func launchCredential(profile: Profile, claudeArguments: [String], signIn: Bool, requireToken: Bool,
                                  mint: (Profile) throws -> MintToken?, now: Date = Date()) throws -> LaunchCredential {
         if signIn { return .profileLogin }
+        if profile.authKind == .vertex { return .vertex }
         if profile.authKind == .endpoint { return .endpointKey }
         if profile.authKind == .apiKey { return .consoleAPIKey }
         if profile.authKind == .consoleLogin { return .consoleLogin }

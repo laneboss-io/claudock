@@ -20,7 +20,7 @@ public enum MonitorError: Error, LocalizedError {
 }
 
 public enum LaunchCredential {
-    case consoleAPIKey, consoleLogin, endpointKey, inferenceToken(String), profileLogin
+    case consoleAPIKey, consoleLogin, endpointKey, vertex, inferenceToken(String), profileLogin
 }
 /// Mirrors the real launch decision over a synthetic token (CLAUDOCK_TEST_MINT), policy
 /// (CLAUDOCK_TEST_REQUIRE_TOKEN), and a saved token that belongs to another account
@@ -33,6 +33,7 @@ public enum InferenceTokenPolicy {
     public static func setRequired(_ required: Bool) throws { markAccess("preferences") }
     public static func launchCredential(profile: Profile, claudeArguments: [String], signIn: Bool) throws -> LaunchCredential {
         if signIn { return .profileLogin }
+        if profile.authKind == .vertex { return .vertex }
         if profile.authKind == .endpoint { return .endpointKey }
         if profile.authKind == .apiKey { return .consoleAPIKey }
         if profile.authKind == .consoleLogin { return .consoleLogin }
@@ -77,6 +78,11 @@ public enum ProfileStore {
     public static func add(name: String, configDirectory: String?) throws -> Profile { try load()[1] }
     public static func addAPIKeyProfile(name: String, apiKey: ConsoleAPIKey, configDirectory: String?) throws -> Profile { try load()[1] }
     public static func addConsoleLoginProfile(name: String, configDirectory: String?) throws -> Profile { try load()[6] }
+    public static func addVertexProfile(name: String, vertex: VertexConfiguration, configDirectory: String?) throws -> Profile {
+        markAccess("profile store")
+        return Profile(command: "claude-" + name, configDirectory: configDirectory ?? "/synthetic/vertex", managed: true,
+                       authKind: .vertex, vertex: vertex)
+    }
     public static func addEndpointProfile(name: String, endpoint: EndpointConfiguration, key: EndpointAPIKey) throws -> Profile {
         markAccess("endpoint key")
         throw MonitorError.unsupported("The synthetic fixture stores no endpoint keys.")
@@ -265,7 +271,7 @@ public enum AccountAvailability {
     public var hasRoom: Bool { self == .available || self == .nearLimit }
     public static func classify(profile: Profile, snapshot: UsageSnapshot?, error: MonitorError?,
                                 credit: APICreditStatus?, creditFailed: Bool = false, now: Date) -> AccountAvailability {
-        if profile.authKind.isConsole { return credit.map { $0.left > 0 ? .available : .full } ?? .untracked }
+        if profile.authKind.tracksCredit { return credit.map { $0.left > 0 ? .available : .full } ?? .untracked }
         guard let headroom = snapshot?.headroom(at: now) else { return .attention }
         return headroom.percentLeft > 0 ? .available : .full
     }

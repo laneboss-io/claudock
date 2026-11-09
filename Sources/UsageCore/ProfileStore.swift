@@ -80,6 +80,12 @@ public enum ProfileStore {
         }
     }
 
+    public static func addVertexProfile(name: String, vertex: VertexConfiguration, configDirectory: String? = nil,
+                                        home: String = NSHomeDirectory()) throws -> Profile {
+        guard vertex.isValid else { throw Failure.invalidManagedFiles }
+        return try add(name: name, configDirectory: configDirectory, authKind: .vertex, vertex: vertex, home: home, beforePublishing: { _ in })
+    }
+
     /// A profile for a third-party endpoint, pinned to one model. Like an API-key profile, its key is saved in Keychain
     /// before the entry is published, and a failed add rolls back the entry, its account folder, and an item it created.
     public static func addEndpointProfile(name: String, endpoint: EndpointConfiguration, key: EndpointAPIKey,
@@ -144,7 +150,7 @@ public enum ProfileStore {
         }
     }
 
-    static func add(name: String, configDirectory: String?, authKind: ProfileAuthKind, endpoint: EndpointConfiguration? = nil, home: String,
+    static func add(name: String, configDirectory: String?, authKind: ProfileAuthKind, endpoint: EndpointConfiguration? = nil, vertex: VertexConfiguration? = nil, home: String,
                     beforePublishing: (Profile) throws -> Void) throws -> Profile {
         let command = try validatedCommand(name)
         let explicitDirectory = configDirectory.flatMap { $0.isEmpty ? nil : $0 }
@@ -159,7 +165,7 @@ public enum ProfileStore {
         let path = explicitDirectory ?? accountParent.appendingPathComponent("claude", isDirectory: true).path
         return try withState(home: home, createAccount: explicitDirectory == nil ? accountParent : nil, beforePublishing: beforePublishing) { state in
             let profile = Profile(command: command, configDirectory: path, registryID: identifier, managed: true, authKind: authKind,
-                                  endpoint: endpoint)
+                                  endpoint: endpoint, vertex: vertex)
             guard !state.profiles.contains(where: { $0.command == command }) else { throw Failure.duplicateName }
             guard !state.profiles.contains(where: { sameCredentialIdentity($0, profile) }) else { throw Failure.duplicateDirectory }
             guard explicitDirectory != nil || !pathEntryExists(accountParent.path) else { throw Failure.directoryExists }
@@ -183,7 +189,7 @@ public enum ProfileStore {
             let renamed = Profile(command: command, configDirectory: profile.configDirectory,
                                   isVertex: profile.isVertex, discoveryNote: profile.discoveryNote,
                                   registryID: state.profiles[index].registryID, managed: true, authKind: profile.authKind,
-                                  endpoint: profile.endpoint)
+                                  endpoint: profile.endpoint, vertex: profile.vertex)
             state.profiles[index] = renamed
             state.profiles = sorted(state.profiles)
             return renamed
@@ -348,7 +354,7 @@ public enum ProfileStore {
         // Older builds accept only version 1 and would drop a Console profile's kind when rewriting the file; a
         // registry holding one is version 2, so they refuse it instead. Builds that accept 1 and 2 cannot keep an
         // endpoint profile either, so a registry holding one is version 3.
-        state.version = state.profiles.contains { $0.authKind.isEndpoint } ? 3 : state.profiles.contains { $0.authKind.isConsole } ? 2 : 1
+        state.version = state.profiles.contains { $0.authKind == .vertex } ? 4 : state.profiles.contains { $0.authKind.isEndpoint } ? 3 : state.profiles.contains { $0.authKind.isConsole } ? 2 : 1
         try validate(state)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -422,7 +428,7 @@ public enum ProfileStore {
     private static func validate(_ state: State) throws {
         let ids = state.profiles.compactMap(\.registryID)
         let commands = state.profiles.map(\.command)
-        guard [1, 2, 3].contains(state.version), state.profiles.count <= 1_000,
+        guard [1, 2, 3, 4].contains(state.version), state.profiles.count <= 1_000,
               state.suppressedCommands.count <= 10_000, state.suppressedDirectories.count <= 10_000,
               ids.count == state.profiles.count, Set(ids).count == ids.count,
               ids.allSatisfy({ UUID(uuidString: $0) != nil }), Set(commands).count == commands.count,
@@ -435,6 +441,7 @@ public enum ProfileStore {
               state.profiles.allSatisfy({ profile in
                   (validPath(profile.configDirectory) || (profile.configDirectory.isEmpty && profile.discoveryNote != nil)) &&
                   (profile.authKind == .subscription || profile.managed) && (profile.authKind == .endpoint) == (profile.endpoint != nil) &&
+                  (profile.authKind == .vertex) == (profile.vertex != nil) && (profile.vertex?.isValid ?? true) &&
                   (!profile.managed || (profile.command != "claude" && !profile.isVertex && profile.discoveryNote == nil && (try? validatedCommand(profile.name, allowLegacyAuto: true)) == profile.command))
               }) else { throw Failure.invalidManagedFiles }
     }

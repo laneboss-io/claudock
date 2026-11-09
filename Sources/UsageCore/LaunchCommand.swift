@@ -25,6 +25,12 @@ public enum LaunchCommand {
         var result = inherited
         for key in clearedEnvironment { result.removeValue(forKey: key) }
         if profile.command != "claude" { result["CLAUDE_CONFIG_DIR"] = profile.configDirectory }
+        if let vertex = profile.vertex, profile.authKind == .vertex {
+            guard vertex.isValid else { throw MonitorError.unsupported("Invalid Vertex configuration.") }
+            result["CLAUDE_CODE_USE_VERTEX"] = "1"
+            result["ANTHROPIC_VERTEX_PROJECT_ID"] = vertex.project
+            result["CLOUD_ML_REGION"] = vertex.region
+        }
         return result
     }
 

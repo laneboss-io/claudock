@@ -43,7 +43,7 @@ public enum APICreditStore {
     /// Console API-key and Console-login profiles have a credit; subscription and third-party endpoint profiles do not.
     @discardableResult
     static func setBalance(_ amount: Decimal, profile: Profile, home: String, now: Date) throws -> APICreditStatus {
-        guard profile.authKind.isConsole else {
+        guard profile.authKind.tracksCredit else {
             throw profile.authKind.isEndpoint ? APICreditError.endpointProfile(profile.name) : APICreditError.subscriptionProfile(profile.name)
         }
         return try setBalance(amount, profileID: profile.id, home: home, now: now)

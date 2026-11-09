@@ -147,7 +147,7 @@ final class EndpointProfileStoreTests: XCTestCase {
         try withHome { home in
             _ = try addEndpoint("deepseek", home: home)
             var state = try registryObject(home)
-            state["version"] = 4
+            state["version"] = 5
             try JSONSerialization.data(withJSONObject: state).write(to: registry(home))
             assertInvalid(home)
         }

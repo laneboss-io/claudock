@@ -43,6 +43,11 @@ public enum ProfileManager {
         try ProfileStore.addConsoleLoginProfile(name: name, configDirectory: configDirectory, home: home)
     }
 
+    public static func addVertexProfile(name: String, vertex: VertexConfiguration, configDirectory: String? = nil,
+                                        home: String = NSHomeDirectory()) throws -> Profile {
+        try ProfileStore.addVertexProfile(name: name, vertex: vertex, configDirectory: configDirectory, home: home)
+    }
+
     public static func rename(profile: Profile, to name: String, home: String = NSHomeDirectory()) throws -> Profile {
         try ProfileStore.rename(profile: profile, to: name, home: home)
     }

@@ -33,7 +33,7 @@ struct AccountState: Identifiable, Equatable {
     /// and for a third-party endpoint, which has neither.
     func percentLeft(at now: Date) -> Double? {
         if profile.authKind.isEndpoint { return nil }
-        if profile.authKind.isConsole { return credit.map { (1 - $0.fraction) * 100 } }
+        if profile.authKind.tracksCredit { return credit.map { (1 - $0.fraction) * 100 } }
         return snapshot?.headroom(at: now)?.percentLeft
     }
 
@@ -42,6 +42,7 @@ struct AccountState: Identifiable, Equatable {
         switch profile.authKind {
         case .apiKey: return "Console API key"
         case .consoleLogin: return organization.map { "Console login · " + $0 } ?? "Console login"
+        case .vertex: return profile.vertex.map { "Vertex AI · " + $0.project + " · " + $0.region } ?? "Vertex AI"
         case .subscription, .endpoint: return nil
         }
     }
@@ -52,7 +53,7 @@ struct AccountState: Identifiable, Equatable {
     }
 
     /// Billed per token, by a Console organization or a third-party provider, rather than within a subscription's limits.
-    var billedPerToken: Bool { profile.authKind.isConsole || profile.authKind.isEndpoint }
+    var billedPerToken: Bool { profile.authKind.tracksCredit || profile.authKind.isEndpoint }
 }
 
 struct AccountReading: Sendable {
@@ -101,7 +102,7 @@ enum AccountGrouping: String, CaseIterable, Identifiable {
 
 /// Which kinds of account the Accounts list shows.
 enum AccountKindFilter: String, CaseIterable, Identifiable {
-    case all, subscription, console, endpoint
+    case all, subscription, console, endpoint, vertex
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -109,6 +110,7 @@ enum AccountKindFilter: String, CaseIterable, Identifiable {
         case .subscription: return "Subscriptions"
         case .console: return "Console"
         case .endpoint: return "Third-party endpoints"
+        case .vertex: return "Vertex AI"
         }
     }
     func includes(_ profile: Profile) -> Bool {
@@ -117,6 +119,7 @@ enum AccountKindFilter: String, CaseIterable, Identifiable {
         case .subscription: return profile.authKind == .subscription
         case .console: return profile.authKind.isConsole
         case .endpoint: return profile.authKind.isEndpoint
+        case .vertex: return profile.authKind == .vertex
         }
     }
 }
@@ -137,7 +140,7 @@ func readAccount(_ profile: Profile, fetcher: UsageFetcher, maxAge: TimeInterval
     if profile.authKind.isEndpoint { return AccountReading() }
     // Billed per token: no Claude login or subscription limits to read, only the local credit ledger
     // and, for a Console sign-in, the organization Claude Code recorded.
-    if profile.authKind.isConsole {
+    if profile.authKind.tracksCredit {
         let organization = profile.authKind == .consoleLogin ? ConsoleLogin.organizationName(profile: profile) : nil
         do { return AccountReading(credit: try APICreditStore.status(profile: profile), organization: organization) }
         catch { return AccountReading(creditError: error.localizedDescription, organization: organization) }
@@ -161,7 +164,11 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
 }
 
 @MainActor final class MonitorStore: ObservableObject {
-    let isDemo = CommandLine.arguments.contains("--demo")
+    let isDemo: Bool
+
+    init(isDemo: Bool? = nil) {
+        self.isDemo = isDemo ?? CommandLine.arguments.contains("--demo")
+    }
     /// `--demo --demo-profiles N` previews a larger synthetic collection (default 4).
     let demoProfileCount: Int = {
         let arguments = CommandLine.arguments
@@ -226,6 +233,7 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
     private var timer: Timer?
     var interval: TimeInterval { TimeInterval([1, 5, 15].contains(refreshMinutes) ? refreshMinutes * 60 : 300) }
     private var analyticsPending = false
+    private var analyticsRequested = false
     /// Earlier scans' per-file results, loaded by the first scan off the main thread; later
     /// scans (and relaunches) read only bytes appended since.
     private let analyticsCache = SessionAnalyticsCache(url: SessionAnalyticsCache.defaultURL, writeInterval: 3 * 3600)
@@ -280,6 +288,7 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
                 ("apiKey", "Console API keys", { $0.authKind == .apiKey }),
                 ("consoleLogin", "Console sign-ins", { $0.authKind == .consoleLogin }),
                 ("endpoint", "Third-party endpoints", { $0.authKind == .endpoint }),
+                ("vertex", "Vertex AI", { $0.authKind == .vertex }),
                 ("other", "Other", { ($0.isVertex || $0.discoveryNote != nil) && $0.authKind == .subscription })
             ]
             return kinds.map { id, title, matches in AccountGroup(id: id, title: title, accounts: accounts.filter { matches($0.profile) }) }
@@ -302,7 +311,7 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
     var attentionCount: Int {
         max(profileError == nil ? 0 : 1, accounts.filter {
             guard !$0.profile.isVertex, !$0.profile.authKind.isEndpoint else { return false }
-            if $0.profile.authKind.isConsole { return $0.credit?.isLow == true }
+            if $0.profile.authKind.tracksCredit { return $0.credit?.isLow == true }
             return $0.error != nil || ($0.snapshot?.peak ?? 0) >= 90
         }.count)
     }
@@ -343,7 +352,7 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
             demo.append(AccountState(profile: DemoData.endpointProfile))
             accounts = demo
             lastRefresh = now; nextRefresh = now.addingTimeInterval(interval)
-            loadAnalytics(); statusChanged?(); return
+            if analyticsRequested { loadAnalytics() }; statusChanged?(); return
         }
         if refreshing { if !manual { refreshPending = true }; return }
         guard !manual || canRefresh else { return }
@@ -362,22 +371,23 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
                 refreshPending = false; statusChanged?()
                 return
             }
-            accounts = profiles.map { profile in
-                if let previous = accounts.first(where: { $0.profile == profile }) { return previous }
-                return AccountState(profile: profile)
-            }
+            let previousAccounts = Dictionary(uniqueKeysWithValues: accounts.map { ($0.profile, $0) })
+            accounts = profiles.map { previousAccounts[$0] ?? AccountState(profile: $0) }
             // Before any request, show what any Claudock process read last, at launch too, and its cooldowns.
             let cached = await Task.detached(priority: .utility) { UsageCache.entries(for: profiles) }.value
-            for index in accounts.indices {
-                if let entry = cached[accounts[index].id] { accounts[index].usage.merge(entry) }
+            var cachedAccounts = accounts
+            for index in cachedAccounts.indices {
+                if let entry = cached[cachedAccounts[index].id] { cachedAccounts[index].usage.merge(entry) }
             }
+            if cachedAccounts != accounts { accounts = cachedAccounts }
             statusChanged?()
-            loadAnalytics(force: manual)
+            if analyticsRequested { loadAnalytics(force: manual) }
             // An automatic refresh reuses readings younger than half its interval; a manual one asks again. The
             // fetcher spaces requests, also from `claudock usage`, so a large collection of accounts does not burst.
-            let fetcher = UsageFetcher()
+            let fetcher = UsageFetcher(lockWait: 2)
             let maxAge = manual ? 0 : interval / 2
-            for profile in profiles {
+            let orderedProfiles = profiles.filter { $0.authKind != .subscription } + profiles.filter { $0.authKind == .subscription }
+            for profile in orderedProfiles {
                 guard let index = accounts.firstIndex(where: { $0.id == profile.id }) else { continue }
                 if accounts[index].usage.isCoolingDown(at: Date()) {
                     // Nothing is requested during a cooldown, but the row still names its account and plan.
@@ -390,21 +400,23 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
                 accounts[index].loading = true
                 let creditSave = creditSaves[profile.id]
                 let reading = await Task.detached(priority: .utility) { await readAccount(profile, fetcher: fetcher, maxAge: maxAge) }.value
-                accounts[index].loading = false
-                accounts[index].email = reading.email
+                var updated = accounts[index]
+                updated.loading = false
+                updated.email = reading.email
                 if let usage = reading.usage {
-                    accounts[index].usage.apply(usage)
-                    accounts[index].plan = accounts[index].plan ?? reading.plan
+                    updated.usage.apply(usage)
+                    updated.plan = updated.plan ?? reading.plan
                 } else {
-                    accounts[index].plan = reading.plan ?? accounts[index].plan
-                    accounts[index].error = reading.error
-                    accounts[index].retryAt = nil
+                    updated.plan = reading.plan ?? updated.plan
+                    updated.error = reading.error
+                    updated.retryAt = nil
                 }
                 if creditSaves[profile.id] == creditSave {
-                    accounts[index].credit = reading.credit
-                    accounts[index].creditError = reading.creditError
+                    updated.credit = reading.credit
+                    updated.creditError = reading.creditError
                 }
-                accounts[index].organization = reading.organization
+                updated.organization = reading.organization
+                accounts[index] = updated
                 statusChanged?()
             }
             await fetcher.finish()
@@ -429,6 +441,7 @@ func accountDetails(_ profile: Profile, knownPlan: SubscriptionPlan?) -> (email:
         NSPasteboard.general.setString(TerminalLauncher.commandToCopy(profile), forType: .string)
     }
     func loadAnalytics(force: Bool = true) {
+        analyticsRequested = true
         if isDemo { analytics = DemoData.analytics(days: analyticsDays); return }
         let profiles = accounts.map(\.profile)
         guard !profiles.isEmpty else { return }

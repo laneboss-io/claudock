@@ -10,7 +10,8 @@ let package = Package(
         .executableTarget(
             name: "ClaudeUsage",
             dependencies: [.product(name: "UsageCore", package: "Claudock")]
-        )
+        ),
+        .testTarget(name: "ClaudeUsageTests", dependencies: ["ClaudeUsage", .product(name: "UsageCore", package: "Claudock")])
     ],
     swiftLanguageModes: [.v5]
 )

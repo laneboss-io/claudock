@@ -94,7 +94,7 @@ Open the **…** menu in the header for Settings. Preferences are saved locally.
 - **Require inference token to launch** makes every Claudock launch of a subscription profile use its inference token; without a valid one, the launch stops instead of using the profile's normal login. `claudock require-token on|off|status` changes the same setting.
 - Closing the dashboard keeps the menu bar app running. Use Settings or right-click the menu bar icon to quit.
 
-Claudock accepts Claude Pro, Max, Team, and Enterprise subscription profiles, Anthropic Console accounts, through a [pasted API key](#console-api-keys) or [Claude Code's own Console sign-in](#sign-in-to-a-console-account-instead), and [third-party endpoints](#third-party-endpoints) that speak the Anthropic Messages protocol. External-provider wrappers such as Vertex, Bedrock, and Foundry are excluded from import. Legacy cloud registrations are removed from the app without deleting their configuration or shared history.
+Claudock accepts Claude Pro, Max, Team, and Enterprise subscription profiles, Anthropic Console accounts, through a [pasted API key](#console-api-keys) or [Claude Code's own Console sign-in](#sign-in-to-a-console-account-instead), managed [Vertex AI profiles](../README.md#use-google-cloud-vertex-ai), and [third-party endpoints](#third-party-endpoints) that speak the Anthropic Messages protocol. Existing external-provider wrappers such as Vertex, Bedrock, and Foundry are excluded from import. Legacy cloud registrations are removed from the app without deleting their configuration or shared history.
 
 ## Manage profiles
 
@@ -276,6 +276,8 @@ The input is the raw key, or exactly one `export NAME=value` or `NAME=value` lin
 **Remove it** like any profile. The key stays in Keychain under `Claudock-endpointkey-…`, and the removal lists it with the command that deletes it. Revoke the key with its provider to stop it working.
 
 Claudock versions up to 1.7.0 cannot open a registry that contains an endpoint profile (it is written as version 3); they report it as invalid rather than dropping the profile. Remove endpoint profiles before going back to such a version.
+
+A registry containing a managed Vertex profile uses version 4. Older builds cannot read it; remove Vertex profiles before reverting to an older build. Vertex budgets are local estimates and do not set or enforce Google Cloud quotas.
 
 ## Privacy and permissions
 

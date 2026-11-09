@@ -29,7 +29,7 @@ README = PROJECT / "README.md"
 # placeholders. Any other README command runs exactly as written.
 PLACEHOLDERS = {"NAME": "smoke", "NEWNAME": "renamed", "ABS_PATH": "/synthetic/readme-check", "AMOUNT": "187.42",
                 "ISO8601_DATE": "2031-01-01", "SECONDS": "60", "CLAUDE_ARGS...": "--resume", "URL": "https://api.example.test/anthropic",
-                "MODEL": "example-flash", "CATALOG_MODEL": "claude-sonnet-4-6"}
+                "MODEL": "example-flash", "CATALOG_MODEL": "claude-sonnet-4-6", "PROJECT_ID": "example-project", "REGION": "us-east5"}
 # What an endpoint launch adds beyond the variables a launch clears; the fake claude reports them too.
 ENDPOINT_EXTRA_KEYS = ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_NON_ESSENTIAL_MODEL_CALLS",
                        "CLAUDE_CODE_DISABLE_1M_CONTEXT", "OTEL_LOGS_EXPORTER", "CLAUDE_CODE_ENABLE_TELEMETRY"]
@@ -163,7 +163,7 @@ def check(base):
 
     sources = [PROJECT / "Sources/ClaudockCLI/ClaudockCLI.swift", PROJECT / "Sources/UsageCore/Profile.swift", PROJECT / "Sources/UsageCore/LaunchCommand.swift",
                PROJECT / "Sources/UsageCore/SubscriptionPlan.swift", PROJECT / "Sources/UsageCore/Endpoint.swift",
-               PROJECT / "Sources/UsageCore/EndpointSession.swift"]
+               PROJECT / "Sources/UsageCore/EndpointSession.swift", PROJECT / "Sources/UsageCore/Vertex.swift"]
     compile_swift(["-emit-library", "-emit-module", "-module-name", "UsageCore", "-o", str(base / "libUsageCore.dylib"),
                    str(FIXTURES / "UsageCoreFixture.swift"), *[str(source) for source in sources[1:]],
                    str(PROJECT / "Sources/UsageCore/SubscriptionConfiguration.swift"), str(PROJECT / "Sources/UsageCore/APICredit.swift")])
@@ -259,7 +259,7 @@ sys.exit(int(os.environ.get("CLAUDOCK_TEST_EXIT", "0")))
         assert result.returncode == expected_status, (arguments, result.returncode, result.stderr)
         assert not marker.exists(), (arguments, "unexpected profile store access")
         if arguments in (["version"], ["--version"]):
-            assert result.stdout.strip() == "Claudock 1.7.0"
+            assert result.stdout.strip() == "Claudock 1.7.1"
         passed.append("parser " + repr(arguments))
 
     result = run(["shell", "profile-names"])

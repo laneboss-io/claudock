@@ -5,8 +5,7 @@ import UsageCore
 struct CreditView: View {
     /// How far the estimate reaches; also the help text of the dashboard's credit rows.
     static let estimateNote = "An estimate from the Claude Code sessions Claudock starts on this Mac, using the cost Claude Code reports "
-        + "for each request. Use of this key elsewhere (other Macs, scripts, other tools) is not seen. The Console balance "
-        + "is authoritative; set the credit again any time."
+        + "for each request. Other Macs, scripts, and tools are not seen. This estimate does not enforce a spending cap or cloud quota."
 
     @ObservedObject var store: MonitorStore
     let profile: Profile
@@ -22,8 +21,8 @@ struct CreditView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Console credit for \(profile.name)").font(.title2.weight(.semibold))
-            Text("Enter the credit remaining in the Claude Console. Claudock subtracts what each request costs from now on.")
+            Text("\(profile.authKind == .vertex ? "Vertex budget" : "Console credit") for \(profile.name)").font(.title2.weight(.semibold))
+            Text(profile.authKind == .vertex ? "Enter a local budget in US dollars. Claudock subtracts reported request costs from now on; this does not set a Google Cloud quota." : "Enter the credit remaining in the Claude Console. Claudock subtracts what each request costs from now on.")
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if let saved {
                 Label("Saved: \(saved.balanceText) as of \(saved.asOf.formatted(date: .abbreviated, time: .shortened))", systemImage: "checkmark.circle.fill")
@@ -34,7 +33,7 @@ struct CreditView: View {
                         .font(.callout)
                 }
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Remaining credit").font(.callout.weight(.medium))
+                    Text(profile.authKind == .vertex ? "Budget" : "Remaining credit").font(.callout.weight(.medium))
                     HStack(spacing: 6) {
                         Text("$").foregroundStyle(.secondary)
                         TextField("200.00", text: $amountText)
@@ -42,7 +41,7 @@ struct CreditView: View {
                             .disabled(busy || store.isDemo)
                             .focused($focused)
                             .onSubmit { save() }
-                            .accessibilityLabel("Remaining Console credit in US dollars")
+                            .accessibilityLabel(profile.authKind == .vertex ? "Vertex budget in US dollars" : "Remaining Console credit in US dollars")
                             .accessibilityIdentifier("creditAmountField")
                         Text("USD").foregroundStyle(.secondary)
                     }

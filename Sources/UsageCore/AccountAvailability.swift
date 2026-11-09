@@ -74,7 +74,7 @@ public enum AccountAvailability: String, CaseIterable, Sendable {
                                 credit: APICreditStatus?, creditFailed: Bool = false, now: Date) -> AccountAvailability {
         // A third-party endpoint bills per token and has no limits or credit to read.
         if profile.isVertex || profile.discoveryNote != nil || profile.authKind.isEndpoint { return .untracked }
-        if profile.authKind.isConsole {
+        if profile.authKind.tracksCredit {
             if creditFailed { return .attention }
             guard let credit else { return .untracked }
             if credit.left <= 0 { return .full }

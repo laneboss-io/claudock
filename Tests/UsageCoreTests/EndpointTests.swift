@@ -288,7 +288,7 @@ final class EndpointTests: XCTestCase {
     // MARK: Kinds
 
     func testKindsAreExplicit() {
-        XCTAssertEqual(ProfileAuthKind.allCases, [.subscription, .apiKey, .consoleLogin, .endpoint])
+        XCTAssertEqual(ProfileAuthKind.allCases, [.subscription, .apiKey, .consoleLogin, .endpoint, .vertex])
         XCTAssertEqual(ProfileAuthKind.allCases.filter(\.isConsole), [.apiKey, .consoleLogin])
         XCTAssertEqual(ProfileAuthKind.allCases.filter(\.isEndpoint), [.endpoint])
         XCTAssertEqual(ProfileAuthKind.endpoint.title, "Third-party endpoint")

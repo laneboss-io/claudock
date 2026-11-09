@@ -102,6 +102,9 @@ struct MonitorView: View {
         .alert("Login item", isPresented: Binding(get: { loginError != nil }, set: { if !$0 { loginError = nil } })) {
             Button("OK") { loginError = nil }
         } message: { Text(loginError ?? "") }
+        .onChange(of: tab) { _, selection in
+            if selection != "Accounts" { store.loadAnalytics(force: false) }
+        }
         .sheet(isPresented: $showManager) { ProfileManagerView(store: store) }
         .sheet(item: $creditProfile) { profile in CreditView(store: store, profile: profile) }
         .sheet(isPresented: $showWelcome) { WelcomeView(store: store) { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { showManager = true } } }
@@ -300,7 +303,7 @@ struct MonitorView: View {
         case .nearLimit: return "Less than 10% left in a limit, or low Console credit"
         case .full: return "A limit is used up until it resets, or no Console credit is left"
         case .attention: return "Needs a sign-in, or the last reading failed"
-        case .untracked: return "Vertex, a profile to import, a third-party endpoint, a Console profile without a credit set, or not read yet"
+        case .untracked: return "A profile to import, a third-party endpoint, a profile without a credit or budget set, or not read yet"
         }
     }
     private func groupHeader(_ group: AccountGroup, collapsed: Bool) -> some View {
@@ -451,7 +454,7 @@ private struct AccountRow: View, Equatable {
                     Text(account.snapshot == nil ? "NEEDS ATTENTION" : "STALE")
                         .font(.system(size: 8, weight: .bold, design: .monospaced)).tracking(0.7).foregroundStyle(accent)
                 } else if account.credit?.isLow == true {
-                    Text("LOW CREDIT")
+                    Text(account.profile.authKind == .vertex ? "LOW BUDGET" : "LOW CREDIT")
                         .font(.system(size: 8, weight: .bold, design: .monospaced)).tracking(0.7).foregroundStyle(usageColor(100))
                 }
                 HStack(spacing: 8) {
@@ -485,7 +488,7 @@ private struct AccountRow: View, Equatable {
             if showEmails, let email = account.email {
                 Text(email).font(.system(size: 11)).foregroundStyle(muted).textSelection(.enabled).padding(.top, -9)
             }
-            if account.profile.authKind.isConsole {
+            if account.profile.authKind.tracksCredit {
                 credit.help(CreditView.estimateNote)
             } else if let endpoint = account.endpointLabel {
                 // No limits or credit to show: where the requests go, and who bills them. Shown verbatim, never as Markdown.
@@ -546,7 +549,7 @@ private struct AccountRow: View, Equatable {
                         .foregroundStyle(credit.isLow ? tint : ink).fixedSize()
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Console credit, \(credit.leftText) left of \(credit.balanceText), \(credit.usedPercentText) percent spent, "
+                .accessibilityLabel("Estimated budget, \(credit.leftText) left of \(credit.balanceText), \(credit.usedPercentText) percent spent, "
                                     + "since \(credit.asOf.formatted(date: .long, time: .omitted)).\(credit.isLow ? " Low credit." : "") Estimate.")
                 HStack(spacing: 6) {
                     // The organization is untrusted text from .claude.json: shown verbatim, never as Markdown.
@@ -567,9 +570,9 @@ private struct AccountRow: View, Equatable {
         }
     }
     private var setCreditButton: some View {
-        Button("Set credit…", action: setCredit)
+        Button(account.profile.authKind == .vertex ? "Set budget…" : "Set credit…", action: setCredit)
             .buttonStyle(.bordered).controlSize(.small).font(.system(size: 10))
-            .accessibilityLabel("Set Console credit for \(account.profile.name)")
+            .accessibilityLabel("Set \(account.profile.authKind == .vertex ? "Vertex budget" : "Console credit") for \(account.profile.name)")
             .accessibilityIdentifier("setCredit-\(account.id)")
     }
     private func badge(_ title: String, help: String, accessibilityLabel: String) -> some View {

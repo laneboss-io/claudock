@@ -86,13 +86,14 @@ The build targets your Mac's architecture. Apple Silicon is validated; Intel is 
 
 ## Add your accounts
 
-Claudock has four kinds of profile. Pick the one that matches how the account is billed. The commands below work with the standalone CLI; the optional app offers profile management too.
+Claudock has five kinds of profile. Pick the one that matches how the account is billed. The commands below work with the standalone CLI; the optional app offers profile management too.
 
 | Kind | Billed to | The dashboard shows |
 | --- | --- | --- |
 | Claude subscription (Pro, Max, Team, or Enterprise) | Your plan | 5-hour, Weekly, and Fable limits |
 | Console account, signed in with a browser | The Anthropic Console organization you sign in to, per token | Console credit, once you set it |
 | Console API key | The Console organization that owns the key, per token | Console credit, once you set it |
+| Google Cloud Vertex AI | Your Google Cloud project, per token | Local estimated budget, once set |
 | Third-party endpoint, such as DeepSeek | The endpoint's provider, per token | The endpoint's host and model |
 
 A third-party endpoint profile is added in Terminal: see [Use a third-party endpoint](#use-a-third-party-endpoint-eg-deepseek).
@@ -300,6 +301,21 @@ claudock run console -- -p --output-format json "Summarize what this folder cont
 
 A wrapper of your own that runs `claude` directly, instead of `claudock run`, gets none of what Claudock adds: no saved key or inference token, no Console credit tracking, and no clearing of inherited authentication variables. Call `claudock run NAME -- …` from the wrapper instead.
 
+## Use Google Cloud Vertex AI
+
+Create a Vertex profile in **Manage profiles**, or in Terminal:
+
+```sh
+gcloud auth application-default login
+claudock profile add cloud --vertex --project my-gcp-project --region us-east5
+claudock profile set-credit cloud 100.00
+claudock run cloud
+```
+
+Enable Vertex AI and grant the application default identity access to Claude models in the chosen Google Cloud project and region. Service-account and other Application Default Credentials are also supported. Claudock passes the project and region to Claude Code; it does not store Google credentials.
+
+The amount is a **local estimated USD budget**, like Console credit tracking: Claudock subtracts costs reported by Claude Code in sessions it launches on this Mac. It may omit activity elsewhere or costs Claude Code does not report, and may differ from Google billing. It does not read Google Cloud quota, impose a hard cap, or stop launches when exhausted. Use Google Cloud for authoritative billing and quota controls. Reset the budget with `set-credit` whenever needed. A registry containing a Vertex profile uses version 4; remove those profiles before reverting to an older Claudock build.
+
 ## Use a third-party endpoint (e.g. DeepSeek)
 
 An endpoint profile runs Claude Code against another service that speaks the Anthropic Messages protocol, such as DeepSeek at `https://api.deepseek.com/anthropic`. You give it the endpoint's URL, one model, and the key the provider issued you. Usage is billed per token by that provider, not by Anthropic.
@@ -378,7 +394,7 @@ A Console row has no limit bars. Once you set its credit, it shows a **Credit** 
 
 With more than four profiles, a filter bar appears above the list:
 
-- **Status chips** count the profiles in each state and filter the list to one: **Available**, **Near limit** (less than 10% left, or low credit), **Full** (a limit is used up until it resets, or no credit is left), **Needs attention** (a sign-in is needed, or there is no reading), and **Not tracked** (Vertex, a profile to import, a third-party endpoint, or a Console profile with no credit set). Click a chip again to show every profile.
+- **Status chips** count the profiles in each state and filter the list to one: **Available**, **Near limit** (less than 10% left, or low credit), **Full** (a limit is used up until it resets, or no credit is left), **Needs attention** (a sign-in is needed, or there is no reading), and **Not tracked** (a profile to import, a third-party endpoint, or a Console or Vertex profile with no credit or budget set). Click a chip again to show every profile.
 - **The search field** finds a profile by name, plan, or Console organization, and by email while emails are shown. Press ⌘F to reach it.
 - **The View menu** limits the list to subscriptions, Console profiles, or third-party endpoints, groups it, and sorts it.
 
@@ -528,6 +544,7 @@ claudock profile list                                                           
 claudock profile add NAME [--directory ABS_PATH]                                                  # Add a subscription profile, or import a folder
 claudock profile add NAME --api-key [--directory ABS_PATH]                                        # Add a Console API-key profile (key from stdin)
 claudock profile add NAME --console [--directory ABS_PATH]                                        # Add a Console profile and sign in in the browser
+claudock profile add NAME --vertex --project PROJECT_ID --region REGION [--directory ABS_PATH]      # Add a Google Cloud Vertex profile
 claudock profile add NAME --endpoint URL --model MODEL [--behaves-as CATALOG_MODEL]               # Add a third-party endpoint profile (key from stdin)
 claudock profile set-key NAME                                                                     # Save a Console API key or endpoint key (from stdin)
 claudock profile set-endpoint NAME [--endpoint URL] [--model MODEL] [--behaves-as CATALOG_MODEL]  # Show or change an endpoint profile's URL and model

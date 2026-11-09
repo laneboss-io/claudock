@@ -11,11 +11,13 @@ public enum ProfileAuthKind: String, Codable, Hashable, Sendable, CaseIterable {
     /// A third-party service that speaks the Anthropic Messages protocol, with a key Claudock keeps in Keychain
     /// and one pinned model (`Profile.endpoint`).
     case endpoint
+    case vertex
 
     /// Billed per token by a Console organization, through a pasted key or a Console sign-in.
     public var isConsole: Bool { self == .apiKey || self == .consoleLogin }
     /// Billed per token by a third-party provider: no Claude login, Console credit, or subscription limits.
     public var isEndpoint: Bool { self == .endpoint }
+    public var tracksCredit: Bool { isConsole || self == .vertex }
 
     public var title: String {
         switch self {
@@ -23,6 +25,7 @@ public enum ProfileAuthKind: String, Codable, Hashable, Sendable, CaseIterable {
         case .apiKey: return "Console API key"
         case .consoleLogin: return "Console account (sign in)"
         case .endpoint: return "Third-party endpoint"
+        case .vertex: return "Google Cloud Vertex AI"
         }
     }
 }
@@ -39,6 +42,7 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
     public let authKind: ProfileAuthKind
     /// The endpoint and pinned model of an `.endpoint` profile; nil for every other kind.
     public let endpoint: EndpointConfiguration?
+    public let vertex: VertexConfiguration?
     public var name: String { command == "claude" ? "default" : String(command.dropFirst(7)) }
     public var launchCommand: String {
         !isVertex && discoveryNote == nil && !configDirectory.isEmpty ? "claudock run \(command)" : command
@@ -46,7 +50,7 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
 
     public init(command: String, configDirectory: String, isVertex: Bool = false, discoveryNote: String? = nil,
                 registryID: String? = nil, managed: Bool = false, authKind: ProfileAuthKind = .subscription,
-                endpoint: EndpointConfiguration? = nil) {
+                endpoint: EndpointConfiguration? = nil, vertex: VertexConfiguration? = nil) {
         self.command = command
         self.configDirectory = configDirectory
         self.isVertex = isVertex
@@ -55,10 +59,11 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
         self.managed = managed
         self.authKind = authKind
         self.endpoint = endpoint
+        self.vertex = vertex
     }
 
     private enum CodingKeys: String, CodingKey {
-        case command, configDirectory, isVertex, discoveryNote, registryID, managed, authKind, endpoint
+        case command, configDirectory, isVertex, discoveryNote, registryID, managed, authKind, endpoint, vertex
     }
 
     public init(from decoder: Decoder) throws {
@@ -71,6 +76,7 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
         managed = try values.decodeIfPresent(Bool.self, forKey: .managed) ?? false
         authKind = try values.decodeIfPresent(ProfileAuthKind.self, forKey: .authKind) ?? .subscription
         endpoint = try values.decodeIfPresent(EndpointConfiguration.self, forKey: .endpoint)
+        vertex = try values.decodeIfPresent(VertexConfiguration.self, forKey: .vertex)
     }
 
     /// Subscription records omit the kind, and only endpoint records hold an endpoint, so registries without
@@ -85,5 +91,6 @@ public struct Profile: Identifiable, Codable, Hashable, Sendable {
         try values.encode(managed, forKey: .managed)
         if authKind != .subscription { try values.encode(authKind, forKey: .authKind) }
         try values.encodeIfPresent(endpoint, forKey: .endpoint)
+        try values.encodeIfPresent(vertex, forKey: .vertex)
     }
 }

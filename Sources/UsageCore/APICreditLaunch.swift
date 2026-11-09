@@ -29,8 +29,9 @@ public enum APICreditLaunch {
                            warn: (String) -> Void) throws -> Int32 {
         let home = NSHomeDirectory()
         for override in APICreditCapture.overridingSettings(configDirectory: profile.configDirectory, workingDirectory: workingDirectory) {
+            let label = profile.authKind == .vertex ? "Vertex budget" : "Console credit"
             warn("\(override.file) sets \(override.key) for Claude Code, which can send its usage events elsewhere; "
-                 + "this run's spend may be missing from the Console credit estimate.")
+                 + "this run's spend may be missing from the \(label) estimate.")
         }
         let capture = CaptureSession(profileID: profile.id, home: home)
         let receiver: APICreditReceiver

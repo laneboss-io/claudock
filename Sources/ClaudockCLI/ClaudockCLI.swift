@@ -75,7 +75,7 @@ private enum CLIError: LocalizedError {
 /// Validate the complete command before reading profiles, credentials, or shell files.
 private enum Command {
     case help, version, list, importShell
-    case add(String, String?), addAPIKey(String, String?), addConsoleLogin(String, String?), setKey(String), setToken(String, Date?), setupToken(String), tokens
+    case add(String, String?), addAPIKey(String, String?), addConsoleLogin(String, String?), addVertex(String, VertexConfiguration, String?), setKey(String), setToken(String, Date?), setupToken(String), tokens
     case addEndpoint(String, EndpointConfiguration)
     /// `setEndpoint(NAME, URL, MODEL, BEHAVES_AS)`: nil keeps that part (`.some(nil)` clears the mapping); with
     /// none given, the endpoint is shown.
@@ -186,13 +186,13 @@ private enum Command {
     /// or --endpoint it is read from standard input.
     private static func add(name value: String, options: [String]) throws -> Command {
         let name = try newName(value)
-        var kinds: [String] = [], directory: String?, endpoint: String?, model: String?, behavesAs: String?
+        var kinds: [String] = [], directory: String?, endpoint: String?, model: String?, behavesAs: String?, project: String?, region: String?
         var index = 0
         while index < options.count {
             let option = options[index]
-            if ["--api-key", "--console", "--endpoint"].contains(option), !kinds.isEmpty, !kinds.contains(option) {
-                throw CLIError.arguments("Choose only one of --api-key, --console, or --endpoint.")
-            } else if ["--api-key", "--console"].contains(option), !kinds.contains(option) {
+            if ["--api-key", "--console", "--endpoint", "--vertex"].contains(option), !kinds.isEmpty, !kinds.contains(option) {
+                throw CLIError.arguments("Choose only one of --api-key, --console, --endpoint, or --vertex.")
+            } else if ["--api-key", "--console", "--vertex"].contains(option), !kinds.contains(option) {
                 kinds.append(option); index += 1
             } else if ["--endpoint", "--model", "--behaves-as"].contains(option), index + 1 >= options.count {
                 throw CLIError.arguments("\(option) needs a value: claudock profile add NAME --endpoint URL --model MODEL [--behaves-as CATALOG_MODEL].")
@@ -202,6 +202,10 @@ private enum Command {
                 endpoint = try endpointURL(options[index + 1]); kinds.append(option); index += 2
             } else if option == "--model", model == nil {
                 model = try modelID(options[index + 1]); index += 2
+            } else if option == "--project", project == nil, index + 1 < options.count {
+                project = options[index + 1]; index += 2
+            } else if option == "--region", region == nil, index + 1 < options.count {
+                region = options[index + 1]; index += 2
             } else if option == "--directory", directory == nil, index + 1 < options.count {
                 let path = options[index + 1]
                 guard path.hasPrefix("/"), !path.contains(where: { $0 == "\0" || $0 == "\n" || $0 == "\r" }) else {
@@ -214,6 +218,13 @@ private enum Command {
                 throw CLIError.arguments("Unknown command or unexpected arguments.")
             }
         }
+        if kinds == ["--vertex"] {
+            guard let project, let region, model == nil, behavesAs == nil else {
+                throw CLIError.arguments("Use: claudock profile add NAME --vertex --project PROJECT_ID --region REGION [--directory ABS_PATH].")
+            }
+            return .addVertex(name, try VertexConfiguration(project: project, region: region), directory)
+        }
+        guard project == nil, region == nil else { throw CLIError.arguments("--project and --region require --vertex.") }
         if let endpoint {
             guard let model else { throw CLIError.arguments("--endpoint needs --model MODEL, the one model the profile is pinned to.") }
             guard directory == nil else { throw CLIError.arguments("An endpoint profile gets a config folder of its own; --directory does not combine with --endpoint.") }
@@ -341,16 +352,16 @@ private struct ClaudockCLI {
     private static func execute(_ command: Command) async throws {
         switch command {
         case .help: print(help)
-        case .version: print("Claudock 1.7.0")
+        case .version: print("Claudock 1.7.1")
         case .list:
             let profiles = try ProfileStore.load()
             print("PROFILE\tSELECTOR\tKIND\tCONFIG_DIRECTORY\tENDPOINT")
             for profile in profiles {
                 let kind = profile.discoveryNote != nil ? "needs-import" : profile.isVertex ? "vertex"
                     : profile.authKind == .apiKey ? "api-key" : profile.authKind == .consoleLogin ? "console-login"
-                    : profile.authKind == .endpoint ? "endpoint" : profile.managed ? "managed" : "imported"
+                    : profile.authKind == .endpoint ? "endpoint" : profile.authKind == .vertex ? "vertex" : profile.managed ? "managed" : "imported"
                 // The host and pinned model, never the key.
-                let endpoint = profile.endpoint.map { "\($0.host) · \($0.model)" + ($0.behavesAs.map { " · behaves as " + $0 } ?? "") } ?? "-"
+                let endpoint = profile.endpoint.map { "\($0.host) · \($0.model)" + ($0.behavesAs.map { " · behaves as " + $0 } ?? "") } ?? profile.vertex.map { "\($0.project) · \($0.region)" } ?? "-"
                 print([profile.name, profile.command, kind, profile.configDirectory, endpoint].map(field).joined(separator: "\t"))
             }
         case .importShell:
@@ -387,6 +398,10 @@ private struct ClaudockCLI {
             guard let endpoint = changed.endpoint else { throw CLIError.notEndpoint(changed.name) }
             print("\(changed.name) now uses \(endpoint.baseURL) with the model \(endpoint.model)"
                   + (endpoint.behavesAs.map { ", which behaves as \($0)" } ?? "") + ". Its key was kept.")
+        case .addVertex(let name, let vertex, let directory):
+            let profile = try ProfileStore.addVertexProfile(name: name, vertex: vertex, configDirectory: directory)
+            print("Added \(profile.name) for Google Cloud project \(vertex.project), region \(vertex.region). Authenticate with Google Application Default Credentials, then run: claudock run \(profile.name)")
+            print("Set a local estimated budget with: claudock profile set-credit \(profile.name) AMOUNT")
         case .addConsoleLogin(let name, let directory):
             let profile = try ProfileStore.addConsoleLoginProfile(name: name, configDirectory: directory)
             print("Added \(profile.name). Sign in to its Anthropic Console account in your browser. "
@@ -436,10 +451,14 @@ private struct ClaudockCLI {
                            + "When the token is shown, save it with: pbpaste | claudock profile set-token \(profile.name)")
         case .setCredit(let name, let amount):
             let profile = try resolve(name)
-            guard profile.authKind.isConsole else {
+            guard profile.authKind.tracksCredit else {
                 throw profile.authKind.isEndpoint ? APICreditError.endpointProfile(profile.name) : APICreditError.subscriptionProfile(profile.name)
             }
             let credit = try APICreditStore.setBalance(amount, profile: profile)
+            if profile.authKind == .vertex {
+                print("Set \(profile.name)'s local Vertex budget to \(credit.balanceText). This estimate counts reported costs from Claudock sessions on this Mac; it does not enforce a Google Cloud quota or spending cap.")
+                return
+            }
             print("Set \(profile.name)'s Console credit to \(credit.balanceText) as of \(ISO8601DateFormatter().string(from: credit.asOf)). "
                   + "'claudock usage' shows what is left after the Claude Code sessions Claudock starts on this Mac; "
                   + "set it again from the Console balance any time.")
@@ -462,6 +481,7 @@ private struct ClaudockCLI {
             case .consoleLogin: print("Removed \(name) from Claudock. Claude data, its Console sign-in, and your own shell commands were preserved.")
             case .subscription: print("Removed \(name) from Claudock. Claude data, credentials, and your own shell commands were preserved.")
             case .endpoint: print("Removed \(name) from Claudock. Claude data, its endpoint key, and your own shell commands were preserved.")
+            case .vertex: print("Removed \(name) from Claudock. Claude data and Google credentials were preserved.")
             }
             printLeftovers(of: profile)
         case .login(let name, let console):
@@ -477,6 +497,8 @@ private struct ClaudockCLI {
                 try switchToConsoleSignIn(profile)
             case .endpoint:
                 throw CLIError.endpointSignIn(profile.name)
+            case .vertex:
+                throw CLIError.arguments("Vertex uses Google Application Default Credentials; run gcloud auth application-default login separately.")
             }
         case .run(let name, let arguments, let allowCrossProviderResume):
             try launch(profile: resolve(name), arguments: arguments, allowCrossProviderResume: allowCrossProviderResume)
@@ -491,6 +513,7 @@ private struct ClaudockCLI {
             }
             if login, profile.authKind == .apiKey { throw CLIError.apiKeySignIn(profile.name) }
             if login, profile.authKind == .endpoint { throw CLIError.endpointSignIn(profile.name) }
+            if login, profile.authKind == .vertex { throw CLIError.arguments("Vertex uses Google Application Default Credentials.") }
             let signIn = profile.authKind == .consoleLogin ? consoleSignIn : ["auth", "login", "--claudeai"]
             try launch(profile: profile, arguments: login ? signIn : arguments, signIn: login)
         case .usage(let maxAge):
@@ -580,6 +603,7 @@ private struct ClaudockCLI {
         case .apiKey: throw CLIError.apiKeyToken(profile.name)
         case .consoleLogin: throw CLIError.consoleLoginToken(profile.name)
         case .endpoint: throw CLIError.endpointToken(profile.name)
+        case .vertex: throw CLIError.arguments("Vertex uses Google Application Default Credentials, not an inference token.")
         }
     }
 
@@ -658,6 +682,8 @@ private struct ClaudockCLI {
             // Claude Code uses the key its Console sign-in keeps; without one it would start signed out.
             guard try ConsoleLogin.isSignedIn(profile: profile) else { throw CLIError.consoleSignIn(profile.name) }
             counted = true
+        case .vertex:
+            counted = true
         case .endpointKey:
             // A plain execve, like a subscription launch: no credit ledger and no OpenTelemetry capture.
             guard let endpoint = profile.endpoint, let key = try EndpointKeyStore.environmentKey(profile: profile) else {
@@ -691,7 +717,8 @@ private struct ClaudockCLI {
                 exit(try APICreditLaunch.run(profile: profile, executable: executable, arguments: claudeArguments, environment: environment,
                                              warn: writeError))
             } catch APICreditLaunchError.receiverUnavailable {
-                writeError("Could not start Claudock's local usage receiver; this run's spend is not counted toward the Console credit.")
+                let label = profile.authKind == .vertex ? "Vertex budget" : "Console credit"
+                writeError("Could not start Claudock's local usage receiver; this run's spend is not counted toward the \(label).")
             } catch APICreditLaunchError.launchFailed(let code) {
                 throw CLIError.launchFailed(code)
             }
@@ -741,9 +768,9 @@ private struct ClaudockCLI {
             guard profile.authKind == .subscription else {
                 do {
                     if let credit = try APICreditStore.status(profile: profile) {
-                        print([profile.name, APICreditStatus.plan, credit.usageWindow, credit.usedPercentText, "-"].map(field).joined(separator: "\t"))
+                        print([profile.name, profile.authKind == .vertex ? "Vertex AI" : APICreditStatus.plan, credit.usageWindow, credit.usedPercentText, "-"].map(field).joined(separator: "\t"))
                     } else {
-                        let billing = profile.authKind == .apiKey ? "Console API key profiles are billed per token and have"
+                        let billing = profile.authKind == .vertex ? "Vertex AI profiles are billed by Google Cloud and have" : profile.authKind == .apiKey ? "Console API key profiles are billed per token and have"
                             : ConsoleLogin.organizationName(profile: profile).map { "Console login · \($0) is billed per token and has" }
                                 ?? "Console login profiles are billed per token and have"
                         writeError("\(field(profile.name)): skipped; \(billing) no subscription limits. "
@@ -798,18 +825,18 @@ private struct ClaudockCLI {
                 writeError("\(field(profile.name)): not listed; " + (profile.endpoint.map(endpointNote) ?? "third-party endpoint."))
                 continue
             }
-            if profile.authKind.isConsole {
-                let kind = profile.authKind == .apiKey ? "api-key" : "console-login"
+            if profile.authKind.tracksCredit {
+                let kind = profile.authKind == .vertex ? "vertex" : profile.authKind == .apiKey ? "api-key" : "console-login"
                 let credit: APICreditStatus?
                 do { credit = try APICreditStore.status(profile: profile) }
                 catch { writeError("\(field(profile.name)): \(error.localizedDescription)"); continue }
                 guard let credit else {
-                    writeError("\(field(profile.name)): not listed; set its Console credit to track it: claudock profile set-credit \(profile.name) AMOUNT")
+                    writeError("\(field(profile.name)): not listed; set its local credit or budget to track it: claudock profile set-credit \(profile.name) AMOUNT")
                     continue
                 }
                 guard AccountAvailability.classify(profile: profile, snapshot: nil, error: nil, credit: credit, now: now).hasRoom else { continue }
                 // Console profiles follow every subscription: they are billed per token.
-                rows.append(Row(profile: profile, kind: kind, plan: APICreditStatus.plan, left: credit.leftText, limit: "Credit", resets: "-",
+                rows.append(Row(profile: profile, kind: kind, plan: profile.authKind == .vertex ? "Vertex AI" : APICreditStatus.plan, left: credit.leftText, limit: "Credit", resets: "-",
                                 rank: -2 + (1 - credit.fraction)))
                 continue
             }
@@ -888,6 +915,7 @@ private struct ClaudockCLI {
       claudock profile add NAME [--directory ABS_PATH]
       claudock profile add NAME --api-key [--directory ABS_PATH]
       claudock profile add NAME --console [--directory ABS_PATH]
+      claudock profile add NAME --vertex --project PROJECT_ID --region REGION [--directory ABS_PATH]
       claudock profile add NAME --endpoint URL --model MODEL [--behaves-as CATALOG_MODEL]
       claudock profile set-key NAME
       claudock profile set-endpoint NAME [--endpoint URL] [--model MODEL] [--behaves-as CATALOG_MODEL]
@@ -984,6 +1012,12 @@ private struct ClaudockCLI {
     --resume, a session in which another model replied, unless it is given
     --allow-cross-provider-resume before '--'. The session picker (--resume
     without a value) cannot be checked first, and prints a warning.
+
+    Vertex: configure Google Application Default Credentials (for example,
+    'gcloud auth application-default login') and grant Vertex access to the
+    project. 'profile set-credit NAME AMOUNT' records a local USD budget.
+    It estimates spend from reported Claude Code costs on this Mac; it does not
+    read or enforce Google Cloud quotas, billing, or a spending cap.
 
     Console credit: 'profile set-credit NAME AMOUNT' records the remaining
     prepaid credit shown in the Claude Console for an API-key or Console-login

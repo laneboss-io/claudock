@@ -17,6 +17,8 @@ struct ProfileManagerView: View {
     @State private var unavailableCredentialStatuses: Set<String> = []
     @State private var addKind: ProfileAuthKind = .subscription
     @State private var apiKeyText = ""
+    @State private var vertexProject = ""
+    @State private var vertexRegion = ""
     @State private var busy = false
     @State private var failure: String?
     @State private var notice: String?
@@ -25,7 +27,7 @@ struct ProfileManagerView: View {
     @State private var shellStatusKnown = false
     @State private var shellFailure: String?
 
-    private var actionsUnavailable: Bool { busy || store.refreshing || store.isDemo }
+    private var actionsUnavailable: Bool { busy || store.isDemo }
 
     private var shellExplanation: String {
         guard shellStatusKnown else { return "Shell integration status is unavailable. Profile management still works in Claudock." }
@@ -55,6 +57,7 @@ struct ProfileManagerView: View {
                             Text("Claude subscription").tag(ProfileAuthKind.subscription)
                             Text("Console API key").tag(ProfileAuthKind.apiKey)
                             Text("Console account (sign in)").tag(ProfileAuthKind.consoleLogin)
+                            Text("Vertex AI").tag(ProfileAuthKind.vertex)
                         }
                         .pickerStyle(.segmented).labelsHidden().accessibilityIdentifier("profileKindPicker")
                         Text("A third-party endpoint, such as DeepSeek's Anthropic-compatible API, is added in Terminal: "
@@ -75,7 +78,16 @@ struct ProfileManagerView: View {
                             Button(configPath.isEmpty ? "Import folder…" : "Change…") { chooseFolder() }
                             if !configPath.isEmpty { Button { configPath = "" } label: { Image(systemName: "xmark.circle") }.buttonStyle(.plain) }
                         }
-                        if addKind == .apiKey {
+                        if addKind == .vertex {
+                            HStack {
+                                Text("Project").foregroundStyle(.secondary)
+                                TextField("Google Cloud project ID", text: $vertexProject).textFieldStyle(.roundedBorder)
+                                Text("Region").foregroundStyle(.secondary)
+                                TextField("us-east5", text: $vertexRegion).textFieldStyle(.roundedBorder)
+                            }
+                            Text("Uses Google Application Default Credentials. Set a local estimated USD budget after adding; Google Cloud enforces its own quotas.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        } else if addKind == .apiKey {
                             HStack {
                                 Text("Key").foregroundStyle(.secondary)
                                 SecureField("sk-ant-…", text: $apiKeyText).textFieldStyle(.roundedBorder)
@@ -172,9 +184,9 @@ struct ProfileManagerView: View {
             }
     }
     private var canSave: Bool {
-        !name.isEmpty && (editing != nil || addKind != .apiKey || !apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        !name.isEmpty && (editing != nil || addKind != .apiKey || !apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) && (editing != nil || addKind != .vertex || (!vertexProject.isEmpty && !vertexRegion.isEmpty))
     }
-    private func resetEditor() { editing = nil; name = ""; configPath = ""; apiKeyText = "" }
+    private func resetEditor() { editing = nil; name = ""; configPath = ""; apiKeyText = ""; vertexProject = ""; vertexRegion = "" }
     private func credentialButtonTitle(_ profile: Profile) -> String {
         if profile.authKind == .apiKey { return "Replace API key…" }
         if profile.authKind == .endpoint { return "Replace key…" }
@@ -199,6 +211,13 @@ struct ProfileManagerView: View {
     }
     private func credentialStatusDescription(_ profile: Profile) -> String {
         let apiKey = profile.authKind == .apiKey, console = profile.authKind == .consoleLogin, endpoint = profile.authKind == .endpoint
+        if profile.authKind == .vertex {
+            let label = profile.vertex.map { "Vertex AI · \($0.project) · \($0.region)" } ?? "Vertex AI"
+            let account = store.accounts.first { $0.profile == profile }
+            if let error = account?.creditError { return label + " · " + error }
+            guard let credit = account?.credit else { return label + " · no local budget set" }
+            return label + " · \(credit.leftText) left of \(credit.balanceText) estimated budget"
+        }
         if store.isDemo && profile.authKind == .subscription { return "Inference token: demo preview" }
         if profile.isVertex || profile.discoveryNote != nil { return "Inference token unavailable for this profile" }
         if unavailableCredentialStatuses.contains(profile.id) {
@@ -239,7 +258,7 @@ struct ProfileManagerView: View {
         }
     }
     private var credentialStatusProfiles: [Profile] {
-        store.accounts.map(\.profile).filter { !$0.isVertex && $0.discoveryNote == nil }
+        store.accounts.map(\.profile).filter { !$0.isVertex && $0.authKind != .vertex && $0.discoveryNote == nil }
     }
     private func readCredentialStatus(_ profile: Profile) async {
         guard !profile.isVertex, profile.discoveryNote == nil else { return }
@@ -327,8 +346,8 @@ struct ProfileManagerView: View {
         guard !actionsUnavailable, canSave else { return }
         busy = true; failure = nil; notice = nil
         let existing = editing; let requestedName = name; let directory = configPath
-        let kind = addKind, rawKey = apiKeyText
-        let shouldLogin = loginAfterAdd && kind != .apiKey
+        let kind = addKind, rawKey = apiKeyText, project = vertexProject, region = vertexRegion
+        let shouldLogin = loginAfterAdd && kind != .apiKey && kind != .vertex
         apiKeyText = ""
         Task {
             defer { busy = false }
@@ -340,6 +359,7 @@ struct ProfileManagerView: View {
                         // The key is checked before anything is created, and saved before the profile is listed.
                         return try ProfileManager.addAPIKeyProfile(name: requestedName, apiKey: ConsoleAPIKey(parsing: rawKey), configDirectory: folder)
                     }
+                    if kind == .vertex { return try ProfileManager.addVertexProfile(name: requestedName, vertex: VertexConfiguration(project: project, region: region), configDirectory: folder) }
                     if kind == .consoleLogin { return try ProfileManager.addConsoleLoginProfile(name: requestedName, configDirectory: folder) }
                     return try ProfileManager.add(name: requestedName, configDirectory: folder)
                 }.value
@@ -506,13 +526,13 @@ private struct ProfileRow: View, Equatable {
                 Text(credentialStatus).font(.system(size: 10)).foregroundStyle(.secondary)
                     .accessibilityLabel(credentialStatus)
                 Spacer(minLength: 8)
-                if profile.authKind.isConsole {
-                    Button("Set credit…", action: setCredit)
+                if profile.authKind.tracksCredit {
+                    Button(profile.authKind == .vertex ? "Set budget…" : "Set credit…", action: setCredit)
                         .buttonStyle(.bordered).controlSize(.small)
                         .disabled(actionsUnavailable)
                         .accessibilityIdentifier("setCredit-\(profile.id)")
-                        .accessibilityLabel("Set Console credit for \(profile.name)")
-                        .help("Enter the remaining credit shown in the Claude Console")
+                        .accessibilityLabel("Set \(profile.authKind == .vertex ? "Vertex budget" : "Console credit") for \(profile.name)")
+                        .help(profile.authKind == .vertex ? "Set an estimated local Vertex budget" : "Enter the remaining credit shown in the Claude Console")
                     if profile.authKind == .apiKey {
                         Button(credentialButton, action: setCredential)
                             .buttonStyle(.bordered).controlSize(.small)
@@ -520,7 +540,7 @@ private struct ProfileRow: View, Equatable {
                             .accessibilityIdentifier("replaceAPIKey-\(profile.id)")
                             .accessibilityLabel("Replace Console API key for \(profile.name)")
                             .help("Paste a new Console API key; it replaces the key saved in Keychain")
-                    } else {
+                    } else if profile.authKind == .consoleLogin {
                         Button("Sign in…", action: login)
                             .buttonStyle(.bordered).controlSize(.small)
                             .disabled(actionsUnavailable)
